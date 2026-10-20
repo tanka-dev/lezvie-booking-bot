@@ -1,0 +1,16 @@
+{
+  "name": "first-bot",
+  "version": "1.0.0",
+  "description": "Telegram-бот записи клиентов для барбершопа/салона",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node --env-file=.env bot.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "grammy": "^1.46.0"
+  }
+}
