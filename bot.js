@@ -9,12 +9,23 @@ const bot = new Bot(process.env.BOT_TOKEN);
 const ADMIN_ID = Number(process.env.ADMIN_ID || 0); // кому слать уведомления о записях
 
 // ---------- настройки мастера (их меняют под каждого клиента-заказчика) ----------
+// minutes — сколько длится услуга: бот не даст записать следующего клиента, пока этот не закончит
 const SERVICES = [
-  { id: "cut", name: "Стрижка", price: 1000 },
-  { id: "beard", name: "Борода", price: 600 },
-  { id: "combo", name: "Стрижка + борода", price: 1400 },
+  { id: "cut", name: "Стрижка", price: 1000, minutes: 60 },
+  { id: "beard", name: "Борода", price: 600, minutes: 30 },
+  { id: "combo", name: "Стрижка + борода", price: 1400, minutes: 90 },
 ];
-const HOURS = ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"];
+// график по дням недели: [открытие, закрытие]; null — выходной
+const SCHEDULE = {
+  пн: ["10:00", "21:00"],
+  вт: ["10:00", "21:00"],
+  ср: ["10:00", "21:00"],
+  чт: ["10:00", "21:00"],
+  пт: ["10:00", "21:00"],
+  сб: ["10:00", "18:00"],
+  вс: null,
+};
+const STEP_MINUTES = 30; // шаг записи: 10:00, 10:30, 11:00…
 const DAYS_AHEAD = 5; // на сколько дней вперёд можно записаться
 const REMIND_BEFORE_HOURS = 2; // за сколько часов напоминать клиенту
 const ADDRESS = "ул. Пушкина, 10";
@@ -87,10 +98,61 @@ const isSlotClosed = (day, time) => {
   return c.days.includes(day) || c.slots.includes(`${day} ${time}`);
 };
 
-const isTaken = (day, time) => loadBookings().some((b) => b.day === day && b.time === time);
-// свободные часы: не заняты, не закрыты мастером и (если сегодня) ещё не прошли
-const freeHours = (day) =>
-  HOURS.filter((h) => !isTaken(day, h) && !isSlotClosed(day, h) && new Date(`${day}T${h}:00`) > new Date());
+// ---------- время, график и длительность ----------
+const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; }; // "10:30" → 630
+const toTime = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; // 630 → "10:30"
+// 90 → "1 ч 30 мин"
+const durText = (min) => [Math.floor(min / 60) && `${Math.floor(min / 60)} ч`, min % 60 && `${min % 60} мин`].filter(Boolean).join(" ");
+const durOf = (b) => b.minutes || 60; // у старых записей длительности нет — считаем час
+const timeRange = (b) => `${b.time}–${toTime(toMin(b.time) + durOf(b))}`; // "10:00–11:30"
+
+const weekdayOf = (iso) => { const [y, m, d] = iso.split("-").map(Number); return WEEKDAYS[new Date(y, m - 1, d).getDay()]; };
+const workHours = (iso) => SCHEDULE[weekdayOf(iso)]; // null — выходной по графику
+// все «клеточки» рабочего дня с шагом STEP_MINUTES: ["10:00", "10:30", …]
+function daySlots(iso) {
+  const wh = workHours(iso);
+  if (!wh) return [];
+  const out = [];
+  for (let m = toMin(wh[0]); m < toMin(wh[1]); m += STEP_MINUTES) out.push(toTime(m));
+  return out;
+}
+// запись, которая занимает эту клеточку (или undefined)
+const bookingAt = (iso, time, list = loadBookings()) =>
+  list.find((b) => b.day === iso && toMin(b.time) <= toMin(time) && toMin(time) < toMin(b.time) + durOf(b));
+
+// можно ли начать услугу длиной minutes в это время: рабочий день, успеваем до закрытия, не прошло, все клеточки свободны
+function canStart(iso, time, minutes, list = loadBookings()) {
+  const wh = workHours(iso);
+  if (!wh || isDayClosed(iso)) return false;
+  const start = toMin(time);
+  const end = start + minutes;
+  if (end > toMin(wh[1])) return false;
+  if (new Date(`${iso}T${time}:00`) <= new Date()) return false;
+  for (let m = start; m < end; m += STEP_MINUTES) {
+    const t = toTime(m);
+    if (isSlotClosed(iso, t) || bookingAt(iso, t, list)) return false;
+  }
+  return true;
+}
+// свободное время для услуги нужной длины
+const freeStarts = (iso, minutes) => {
+  const list = loadBookings();
+  return daySlots(iso).filter((t) => canStart(iso, t, minutes, list));
+};
+
+// график для «Контактов»: "пн–пт: 10:00–21:00 / сб: 10:00–18:00 / вс: выходной"
+function scheduleText() {
+  const order = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
+  const val = (d) => (SCHEDULE[d] ? SCHEDULE[d].join("–") : "выходной");
+  const parts = [];
+  for (let i = 0; i < order.length; ) {
+    let j = i;
+    while (j + 1 < order.length && val(order[j + 1]) === val(order[i])) j++;
+    parts.push(`${i === j ? order[i] : `${order[i]}–${order[j]}`}: ${val(order[i])}`);
+    i = j + 1;
+  }
+  return parts.join("\n🕙 ");
+}
 
 // Постоянные кнопки внизу экрана (вместо клавиатуры) — видны всегда, не уезжают вверх с сообщениями
 const BTN = { book: "✂️ Записаться", mine: "📋 Мои записи", prices: "💰 Цены", contacts: "📍 Контакты" };
@@ -137,7 +199,7 @@ function listView() {
   list.forEach((b) => kb.text(`❌ ${shortDay(b.day)}, ${b.time} — ${b.name.split(" ")[0]}`, `adel:${b.id}`).row());
   kb.text("⬅️ Назад", "adm:menu");
   const text = list.length
-    ? "📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service} — ${b.name}${b.phone ? `, ${b.phone}` : ""}`).join("\n") + "\n\nНажми на запись, чтобы отменить её."
+    ? "📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${timeRange(b)} — ${b.service} — ${b.name}${b.phone ? `, ${b.phone}` : ""}`).join("\n") + "\n\nНажми на запись, чтобы отменить её."
     : "Предстоящих записей нет.";
   return { text, kb };
 }
@@ -153,7 +215,7 @@ function daysView() {
   const all = loadBookings();
   for (const d of nextDays(MASTER_DAYS)) {
     const n = all.filter((b) => b.day === d.iso).length;
-    const mark = isDayClosed(d.iso) ? "🚫 выходной" : n ? `👤 ${n}` : "";
+    const mark = !workHours(d.iso) ? "🚫 выходной по графику" : isDayClosed(d.iso) ? "🚫 выходной" : n ? `👤 ${n}` : "";
     kb.text(`${prettyDay(d.iso)}${mark ? "  ·  " + mark : ""}`, `aday:${d.iso}`).row();
   }
   kb.text("⬅️ Назад", "adm:menu");
@@ -162,12 +224,19 @@ function daysView() {
 
 // один день: часы с состояниями
 function dayView(iso) {
+  if (!workHours(iso)) {
+    return {
+      text: `📅 ${prettyDay(iso)} — выходной по графику.\nГрафик меняется в настройках бота (SCHEDULE).`,
+      kb: new InlineKeyboard().text("⬅️ К списку дней", "adm:days"),
+    };
+  }
   const closedDay = isDayClosed(iso);
+  const list = loadBookings();
   const kb = new InlineKeyboard();
-  HOURS.forEach((h, i) => {
-    const icon = isTaken(iso, h) ? "👤" : isSlotClosed(iso, h) ? "🚫" : "✅";
+  daySlots(iso).forEach((h, i) => {
+    const icon = bookingAt(iso, h, list) ? "👤" : isSlotClosed(iso, h) ? "🚫" : "✅";
     kb.text(`${icon} ${h}`, `aslot:${iso}|${h}`);
-    if (i % 3 === 2) kb.row();
+    if (i % 4 === 3) kb.row();
   });
   kb.row();
   kb.text(closedDay ? "✅ Сделать рабочим" : "🚫 Сделать выходным", `${closedDay ? "aopen" : "aclose"}:${iso}`).row();
@@ -193,7 +262,7 @@ bot.callbackQuery(/^adel:(.+)$/, async (ctx) => {
   const b = loadBookings().find((x) => x.id === ctx.match[1]);
   if (!b) { const v = listView(); return edit(ctx, "Эта запись уже отменена.\n\n" + v.text, v.kb); }
   const kb = new InlineKeyboard().text("✅ Да, отменить", `adelok:${b.id}`).text("⬅️ Нет", "adm:list");
-  await edit(ctx, `Отменить запись?\n👤 ${b.name}${b.phone ? `, ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}\n\nКлиенту придёт сообщение об отмене.`, kb);
+  await edit(ctx, `Отменить запись?\n👤 ${b.name}${b.phone ? `, ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${timeRange(b)}\n\nКлиенту придёт сообщение об отмене.`, kb);
 });
 bot.callbackQuery(/^adelok:(.+)$/, async (ctx) => {
   const list = loadBookings();
@@ -213,7 +282,7 @@ bot.callbackQuery(/^adelok:(.+)$/, async (ctx) => {
 // закрыть/открыть отдельный час
 bot.callbackQuery(/^aslot:(.+)\|(.+)$/, async (ctx) => {
   const [, iso, h] = ctx.match;
-  if (isTaken(iso, h)) return ctx.answerCallbackQuery({ text: "На это время есть запись. Отмени её в «📋 Записи».", show_alert: true });
+  if (bookingAt(iso, h)) return ctx.answerCallbackQuery({ text: "На это время есть запись. Отмени её в «📋 Записи».", show_alert: true });
   if (isDayClosed(iso)) return ctx.answerCallbackQuery({ text: "Весь день выходной. Сначала сделай его рабочим.", show_alert: true });
   const c = loadClosed();
   const key = `${iso} ${h}`;
@@ -250,13 +319,13 @@ bot.callbackQuery(/^aopen:(.+)$/, async (ctx) => {
 // ---------- разделы меню ----------
 // Каждый раздел — отдельная функция: её вызывают и кнопка внизу, и команда из «Меню», и старые кнопки в сообщениях
 const showPrices = (ctx) =>
-  ctx.reply("💰 Цены:\n" + SERVICES.map((s) => `• ${s.name} — ${s.price} ₽`).join("\n"), { reply_markup: mainMenu });
+  ctx.reply("💰 Цены:\n" + SERVICES.map((s) => `• ${s.name} — ${s.price} ₽ (${durText(s.minutes)})`).join("\n"), { reply_markup: mainMenu });
 const showContacts = (ctx) =>
-  ctx.reply(`📍 ${ADDRESS}\n🕙 Каждый день 10:00–21:00\n📞 +7 900 000-00-00`, { reply_markup: mainMenu });
+  ctx.reply(`📍 ${ADDRESS}\n🕙 ${scheduleText()}\n📞 +7 900 000-00-00`, { reply_markup: mainMenu });
 
 async function showBook(ctx) {
   const kb = new InlineKeyboard();
-  SERVICES.forEach((s) => kb.text(`${s.name} — ${s.price} ₽`, `svc:${s.id}`).row());
+  SERVICES.forEach((s) => kb.text(`${s.name} — ${s.price} ₽ · ${durText(s.minutes)}`, `svc:${s.id}`).row());
   await ctx.reply("Выбери услугу:", { reply_markup: kb });
 }
 
@@ -268,7 +337,7 @@ async function showMine(ctx) {
   const kb = new InlineKeyboard();
   mine.forEach((b) => kb.text(`❌ Отменить ${prettyDay(b.day)}, ${b.time}`, `del:${b.id}`).row());
   await ctx.reply(
-    "📋 Твои записи:\n" + mine.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service}`).join("\n"),
+    "📋 Твои записи:\n" + mine.map((b) => `• ${prettyDay(b.day)}, ${timeRange(b)} — ${b.service}`).join("\n"),
     { reply_markup: kb },
   );
 }
@@ -302,9 +371,10 @@ bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
 bot.callbackQuery(/^svc:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const service = SERVICES.find((s) => s.id === ctx.match[1]);
-  drafts.set(ctx.from.id, { service: service.name });
-  // показываем только дни, где есть свободное время (выходные и полностью занятые дни скрыты)
-  const days = nextDays().filter((d) => freeHours(d.iso).length);
+  if (!service) return ctx.reply("Эта услуга больше недоступна. Выбери заново 👇", { reply_markup: mainMenu });
+  drafts.set(ctx.from.id, { service: service.name, minutes: service.minutes });
+  // показываем только дни, где есть свободное время под эту услугу (выходные и занятые дни скрыты)
+  const days = nextDays().filter((d) => freeStarts(d.iso, service.minutes).length);
   if (!days.length) return ctx.editMessageText(`✂️ ${service.name}\nНа ближайшие дни свободного времени нет 😔 Загляни позже или позвони: ${ADDRESS}`);
   const kb = new InlineKeyboard();
   days.forEach((d, i) => { kb.text(d.label, `day:${d.iso}`); if (i % 2 === 1) kb.row(); });
@@ -316,7 +386,7 @@ bot.callbackQuery(/^day:(.+)$/, async (ctx) => {
   const draft = drafts.get(ctx.from.id);
   if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
   draft.day = ctx.match[1];
-  const free = freeHours(draft.day);
+  const free = freeStarts(draft.day, draft.minutes);
   if (!free.length) return ctx.editMessageText(`На ${prettyDay(draft.day)} свободного времени нет 😔`, { reply_markup: new InlineKeyboard().text("⬅️ Выбрать другой день", "book") });
   const kb = new InlineKeyboard();
   free.forEach((h, i) => { kb.text(h, `time:${h}`); if (i % 4 === 3) kb.row(); });
@@ -329,7 +399,7 @@ bot.callbackQuery(/^time:(.+)$/, async (ctx) => {
   if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
   draft.time = ctx.match[1];
   const kb = new InlineKeyboard().text("✅ Подтвердить", "confirm").text("❌ Отмена", "cancel");
-  await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}`, { reply_markup: kb });
+  await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}`, { reply_markup: kb });
 });
 
 bot.callbackQuery("cancel", async (ctx) => {
@@ -343,10 +413,10 @@ bot.callbackQuery("confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
   const draft = drafts.get(ctx.from.id);
   if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
-  if (isTaken(draft.day, draft.time) || isSlotClosed(draft.day, draft.time)) return ctx.editMessageText("Ой, это время только что заняли 😔", { reply_markup: new InlineKeyboard().text("⬅️ Заново", "book") });
+  if (!canStart(draft.day, draft.time, draft.minutes)) return ctx.editMessageText("Ой, это время только что заняли 😔", { reply_markup: new InlineKeyboard().text("⬅️ Заново", "book") });
 
   // убираем кнопки «Подтвердить/Отмена», чтобы не нажали второй раз
-  await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}`);
+  await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}`);
   if (getUser(ctx.from.id)?.phone) return finishBooking(ctx, draft);
 
   // номера ещё нет — просим один раз, запись завершится, когда он придёт
@@ -365,22 +435,22 @@ async function finishBooking(ctx, draft) {
   const user = getUser(ctx.from.id);
   const phone = user.phone;
   drafts.delete(ctx.from.id);
-  if (isTaken(draft.day, draft.time) || isSlotClosed(draft.day, draft.time)) return ctx.reply("Ой, это время только что заняли 😔 Выбери другое 👇", { reply_markup: mainMenu });
+  if (!canStart(draft.day, draft.time, draft.minutes)) return ctx.reply("Ой, это время только что заняли 😔 Выбери другое 👇", { reply_markup: mainMenu });
 
   const name = ctx.from.first_name + (ctx.from.username ? ` (@${ctx.from.username})` : "");
   const list = loadBookings();
   list.push({
     id: Math.random().toString(36).slice(2, 9),
-    service: draft.service, day: draft.day, time: draft.time,
+    service: draft.service, minutes: draft.minutes, day: draft.day, time: draft.time,
     name, phone, userId: ctx.from.id, reminded: false, createdAt: new Date().toISOString(),
   });
   saveBookings(list);
 
   await ctx.reply(
-    `✅ Ты записан!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}\n\nЖдём тебя: ${ADDRESS}\nНапомню за ${REMIND_BEFORE_HOURS} часа 😉`,
+    `✅ Ты записан!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}\n\nЖдём тебя: ${ADDRESS}\nНапомню за ${REMIND_BEFORE_HOURS} часа 😉`,
     { reply_markup: mainMenu },
   );
-  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phoneLine(user)}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${draft.time}`);
+  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phoneLine(user)}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${timeRange(draft)}`);
 }
 
 // ждём ли мы от человека номер: при записи или при смене номера
