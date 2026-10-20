@@ -66,9 +66,9 @@ function prettyDay(iso) {
 // дата + время записи как объект Date (по местному времени)
 const bookingDate = (b) => new Date(`${b.day}T${b.time}:00`);
 
-function nextDays() {
+function nextDays(count = DAYS_AHEAD) {
   const out = [];
-  for (let i = 0; i < DAYS_AHEAD; i++) {
+  for (let i = 0; i < count; i++) {
     const d = new Date();
     d.setDate(d.getDate() + i);
     const iso = isoDay(d);
@@ -76,10 +76,21 @@ function nextDays() {
   }
   return out;
 }
+
+// ---------- выходные и закрытые часы (closed.json) — мастер управляет сам через /master ----------
+const CLOSED_FILE = "closed.json";
+const loadClosed = () => (fs.existsSync(CLOSED_FILE) ? JSON.parse(fs.readFileSync(CLOSED_FILE, "utf8")) : { days: [], slots: [] });
+const saveClosed = (c) => fs.writeFileSync(CLOSED_FILE, JSON.stringify(c, null, 2));
+const isDayClosed = (day) => loadClosed().days.includes(day);
+const isSlotClosed = (day, time) => {
+  const c = loadClosed();
+  return c.days.includes(day) || c.slots.includes(`${day} ${time}`);
+};
+
 const isTaken = (day, time) => loadBookings().some((b) => b.day === day && b.time === time);
-// свободные часы: не заняты и (если сегодня) ещё не прошли
+// свободные часы: не заняты, не закрыты мастером и (если сегодня) ещё не прошли
 const freeHours = (day) =>
-  HOURS.filter((h) => !isTaken(day, h) && new Date(`${day}T${h}:00`) > new Date());
+  HOURS.filter((h) => !isTaken(day, h) && !isSlotClosed(day, h) && new Date(`${day}T${h}:00`) > new Date());
 
 // Постоянные кнопки внизу экрана (вместо клавиатуры) — видны всегда, не уезжают вверх с сообщениями
 const BTN = { book: "✂️ Записаться", mine: "📋 Мои записи", prices: "💰 Цены", contacts: "📍 Контакты" };
@@ -104,11 +115,136 @@ bot.command("start", (ctx) =>
   ctx.reply(`Привет, ${ctx.from.first_name}! 👋\nЯ бот барбершопа «Лезвие». Выбери кнопку внизу 👇`, { reply_markup: mainMenu }),
 );
 bot.command("myid", (ctx) => ctx.reply(`Твой id: ${ctx.from.id}`));
+// ---------- панель мастера: /master ----------
+const isAdmin = (ctx) => ctx.from.id === ADMIN_ID;
+const MASTER_DAYS = 14; // на сколько дней вперёд мастер видит график
+const upcoming = () => loadBookings().filter((b) => bookingDate(b) > new Date()).sort((a, b) => bookingDate(a) - bookingDate(b));
+const shortDay = (iso) => prettyDay(iso).replace(/ [а-я]+$/, "").replace(",", ""); // "ср 21"
+
+const masterKb = new InlineKeyboard().text("📋 Записи", "adm:list").row().text("🗓 График и выходные", "adm:days");
+bot.command("master", (ctx) => {
+  if (!isAdmin(ctx)) return ctx.reply("Эта команда только для мастера.");
+  return ctx.reply("🛠 Панель мастера", { reply_markup: masterKb });
+});
+
+// редактируем сообщение; ошибку «текст не изменился» спокойно пропускаем
+const edit = (ctx, text, kb) => ctx.editMessageText(text, { reply_markup: kb }).catch(() => {});
+
+// список записей с кнопками отмены
+function listView() {
+  const list = upcoming();
+  const kb = new InlineKeyboard();
+  list.forEach((b) => kb.text(`❌ ${shortDay(b.day)}, ${b.time} — ${b.name.split(" ")[0]}`, `adel:${b.id}`).row());
+  kb.text("⬅️ Назад", "adm:menu");
+  const text = list.length
+    ? "📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service} — ${b.name}${b.phone ? `, ${b.phone}` : ""}`).join("\n") + "\n\nНажми на запись, чтобы отменить её."
+    : "Предстоящих записей нет.";
+  return { text, kb };
+}
 bot.command("zapisi", (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return ctx.reply("Эта команда только для мастера.");
-  const list = loadBookings().filter((b) => bookingDate(b) > new Date()).sort((a, b) => bookingDate(a) - bookingDate(b));
-  if (!list.length) return ctx.reply("Предстоящих записей нет.");
-  ctx.reply("📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service} — ${b.name}${b.phone ? `, ${b.phone}` : ""}`).join("\n"));
+  if (!isAdmin(ctx)) return ctx.reply("Эта команда только для мастера.");
+  const { text, kb } = listView();
+  return ctx.reply(text, { reply_markup: kb });
+});
+
+// список дней: где выходной, где сколько записей
+function daysView() {
+  const kb = new InlineKeyboard();
+  const all = loadBookings();
+  for (const d of nextDays(MASTER_DAYS)) {
+    const n = all.filter((b) => b.day === d.iso).length;
+    const mark = isDayClosed(d.iso) ? "🚫 выходной" : n ? `👤 ${n}` : "";
+    kb.text(`${prettyDay(d.iso)}${mark ? "  ·  " + mark : ""}`, `aday:${d.iso}`).row();
+  }
+  kb.text("⬅️ Назад", "adm:menu");
+  return { text: "🗓 Выбери день, чтобы закрыть его или отдельные часы:", kb };
+}
+
+// один день: часы с состояниями
+function dayView(iso) {
+  const closedDay = isDayClosed(iso);
+  const kb = new InlineKeyboard();
+  HOURS.forEach((h, i) => {
+    const icon = isTaken(iso, h) ? "👤" : isSlotClosed(iso, h) ? "🚫" : "✅";
+    kb.text(`${icon} ${h}`, `aslot:${iso}|${h}`);
+    if (i % 3 === 2) kb.row();
+  });
+  kb.row();
+  kb.text(closedDay ? "✅ Сделать рабочим" : "🚫 Сделать выходным", `${closedDay ? "aopen" : "aclose"}:${iso}`).row();
+  kb.text("⬅️ К списку дней", "adm:days");
+  const text = `📅 ${prettyDay(iso)}${closedDay ? " — ВЫХОДНОЙ" : ""}\n✅ свободно · 👤 запись · 🚫 закрыто\nНажми на час, чтобы закрыть или открыть его.`;
+  return { text, kb };
+}
+
+// все кнопки панели мастера проверяют, что нажал именно мастер
+bot.callbackQuery(/^(adm|adel|adelok|aday|aslot|aclose|aopen):?(.*)$/, async (ctx, next) => {
+  if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Только для мастера", show_alert: true });
+  return next();
+});
+
+bot.callbackQuery("adm:menu", async (ctx) => { await ctx.answerCallbackQuery(); await edit(ctx, "🛠 Панель мастера", masterKb); });
+bot.callbackQuery("adm:list", async (ctx) => { await ctx.answerCallbackQuery(); const v = listView(); await edit(ctx, v.text, v.kb); });
+bot.callbackQuery("adm:days", async (ctx) => { await ctx.answerCallbackQuery(); const v = daysView(); await edit(ctx, v.text, v.kb); });
+bot.callbackQuery(/^aday:(.+)$/, async (ctx) => { await ctx.answerCallbackQuery(); const v = dayView(ctx.match[1]); await edit(ctx, v.text, v.kb); });
+
+// мастер отменяет запись: сначала переспрашиваем, чтобы не отменить случайно
+bot.callbackQuery(/^adel:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const b = loadBookings().find((x) => x.id === ctx.match[1]);
+  if (!b) { const v = listView(); return edit(ctx, "Эта запись уже отменена.\n\n" + v.text, v.kb); }
+  const kb = new InlineKeyboard().text("✅ Да, отменить", `adelok:${b.id}`).text("⬅️ Нет", "adm:list");
+  await edit(ctx, `Отменить запись?\n👤 ${b.name}${b.phone ? `, ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}\n\nКлиенту придёт сообщение об отмене.`, kb);
+});
+bot.callbackQuery(/^adelok:(.+)$/, async (ctx) => {
+  const list = loadBookings();
+  const b = list.find((x) => x.id === ctx.match[1]);
+  if (!b) { await ctx.answerCallbackQuery(); const v = listView(); return edit(ctx, v.text, v.kb); }
+  saveBookings(list.filter((x) => x !== b));
+  await ctx.answerCallbackQuery({ text: "Запись отменена, клиент уведомлён" });
+  const v = listView();
+  await edit(ctx, `✅ Отменил: ${prettyDay(b.day)}, ${b.time} — ${b.name}\n\n` + v.text, v.kb);
+  try {
+    await bot.api.sendMessage(b.userId, `😔 К сожалению, мастер отменил твою запись:\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}\n\nВыбери другое время — нажми «✂️ Записаться» 👇`, { reply_markup: mainMenu });
+  } catch (e) {
+    await notifyAdmin(`⚠️ Не удалось написать клиенту ${b.name} (возможно, он заблокировал бота). Позвони: ${b.phone || "номера нет"}`);
+  }
+});
+
+// закрыть/открыть отдельный час
+bot.callbackQuery(/^aslot:(.+)\|(.+)$/, async (ctx) => {
+  const [, iso, h] = ctx.match;
+  if (isTaken(iso, h)) return ctx.answerCallbackQuery({ text: "На это время есть запись. Отмени её в «📋 Записи».", show_alert: true });
+  if (isDayClosed(iso)) return ctx.answerCallbackQuery({ text: "Весь день выходной. Сначала сделай его рабочим.", show_alert: true });
+  const c = loadClosed();
+  const key = `${iso} ${h}`;
+  c.slots = c.slots.includes(key) ? c.slots.filter((s) => s !== key) : [...c.slots, key];
+  saveClosed(c);
+  await ctx.answerCallbackQuery({ text: c.slots.includes(key) ? `${h} закрыто` : `${h} открыто` });
+  const v = dayView(iso);
+  await edit(ctx, v.text, v.kb);
+});
+
+// весь день — выходной / рабочий
+bot.callbackQuery(/^aclose:(.+)$/, async (ctx) => {
+  const iso = ctx.match[1];
+  const c = loadClosed();
+  if (!c.days.includes(iso)) c.days.push(iso);
+  saveClosed(c);
+  const n = loadBookings().filter((b) => b.day === iso).length;
+  await ctx.answerCallbackQuery(
+    n ? { text: `День закрыт для новых записей. Но на него уже есть записи (${n}) — если нужно, отмени их в «📋 Записи».`, show_alert: true } : { text: "Выходной 🚫" },
+  );
+  const v = dayView(iso);
+  await edit(ctx, v.text, v.kb);
+});
+bot.callbackQuery(/^aopen:(.+)$/, async (ctx) => {
+  const iso = ctx.match[1];
+  const c = loadClosed();
+  c.days = c.days.filter((d) => d !== iso);
+  saveClosed(c);
+  await ctx.answerCallbackQuery({ text: "День снова рабочий ✅" });
+  const v = dayView(iso);
+  await edit(ctx, v.text, v.kb);
 });
 
 // ---------- разделы меню ----------
@@ -167,8 +303,11 @@ bot.callbackQuery(/^svc:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const service = SERVICES.find((s) => s.id === ctx.match[1]);
   drafts.set(ctx.from.id, { service: service.name });
+  // показываем только дни, где есть свободное время (выходные и полностью занятые дни скрыты)
+  const days = nextDays().filter((d) => freeHours(d.iso).length);
+  if (!days.length) return ctx.editMessageText(`✂️ ${service.name}\nНа ближайшие дни свободного времени нет 😔 Загляни позже или позвони: ${ADDRESS}`);
   const kb = new InlineKeyboard();
-  nextDays().forEach((d, i) => { kb.text(d.label, `day:${d.iso}`); if (i % 2 === 1) kb.row(); });
+  days.forEach((d, i) => { kb.text(d.label, `day:${d.iso}`); if (i % 2 === 1) kb.row(); });
   await ctx.editMessageText(`✂️ ${service.name}\nВыбери день:`, { reply_markup: kb });
 });
 
@@ -204,7 +343,7 @@ bot.callbackQuery("confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
   const draft = drafts.get(ctx.from.id);
   if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
-  if (isTaken(draft.day, draft.time)) return ctx.editMessageText("Ой, это время только что заняли 😔", { reply_markup: new InlineKeyboard().text("⬅️ Заново", "book") });
+  if (isTaken(draft.day, draft.time) || isSlotClosed(draft.day, draft.time)) return ctx.editMessageText("Ой, это время только что заняли 😔", { reply_markup: new InlineKeyboard().text("⬅️ Заново", "book") });
 
   // убираем кнопки «Подтвердить/Отмена», чтобы не нажали второй раз
   await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}`);
@@ -226,7 +365,7 @@ async function finishBooking(ctx, draft) {
   const user = getUser(ctx.from.id);
   const phone = user.phone;
   drafts.delete(ctx.from.id);
-  if (isTaken(draft.day, draft.time)) return ctx.reply("Ой, это время только что заняли 😔 Выбери другое 👇", { reply_markup: mainMenu });
+  if (isTaken(draft.day, draft.time) || isSlotClosed(draft.day, draft.time)) return ctx.reply("Ой, это время только что заняли 😔 Выбери другое 👇", { reply_markup: mainMenu });
 
   const name = ctx.from.first_name + (ctx.from.username ? ` (@${ctx.from.username})` : "");
   const list = loadBookings();
@@ -320,14 +459,22 @@ setInterval(sendReminders, 60 * 1000);
 // Кнопка «Меню» слева от поля ввода и текст «Что умеет этот бот?», который видно в пустом чате до нажатия «Старт»
 async function setupProfile() {
   try {
-    await bot.api.setMyCommands([
+    const clientCommands = [
       { command: "zapis", description: "✂️ Записаться" },
       { command: "moi", description: "📋 Мои записи" },
       { command: "ceny", description: "💰 Цены" },
       { command: "kontakty", description: "📍 Контакты" },
       { command: "nomer", description: "📞 Изменить номер телефона" },
       { command: "start", description: "🏠 Главное меню" },
-    ]);
+    ];
+    await bot.api.setMyCommands(clientCommands);
+    // у мастера в «Меню» дополнительно его команды — клиенты их не видят
+    if (ADMIN_ID) {
+      await bot.api.setMyCommands(
+        [{ command: "master", description: "🛠 Панель мастера" }, { command: "zapisi", description: "📋 Все записи" }, ...clientCommands],
+        { scope: { type: "chat", chat_id: ADMIN_ID } },
+      );
+    }
     await bot.api.setMyDescription(
       `Онлайн-запись в барбершоп «Лезвие» ✂️\n\n• Запишись за 30 секунд — без звонков и переписки\n• Видно только свободное время\n• Напомню о визите за ${REMIND_BEFORE_HOURS} часа\n• Отменить запись — в один клик\n\nНажми «Старт» 👇`,
     );
