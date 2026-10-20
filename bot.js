@@ -31,6 +31,16 @@ function loadBookings() {
 }
 const saveBookings = (list) => fs.writeFileSync(FILE, JSON.stringify(list, null, 2));
 
+// ---------- телефоны клиентов (users.json): спрашиваем один раз, дальше помним ----------
+const USERS_FILE = "users.json";
+const loadUsers = () => (fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE, "utf8")) : {});
+const getPhone = (userId) => loadUsers()[userId]?.phone;
+function savePhone(userId, phone) {
+  const users = loadUsers();
+  users[userId] = { phone };
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
 const drafts = new Map(); // черновик записи, пока человек выбирает
 
 // ---------- даты ----------
@@ -71,6 +81,10 @@ const mainMenu = new Keyboard()
   .resized()     // кнопки компактные, а не на пол-экрана
   .persistent(); // не прячутся после нажатия
 
+// Кнопка «Отправить номер»: Telegram сам подставляет номер аккаунта — его нельзя выдумать или ввести с ошибкой
+const PHONE_CANCEL = "❌ Отмена записи";
+const phoneKb = new Keyboard().requestContact("📱 Отправить мой номер").row().text(PHONE_CANCEL).resized();
+
 const notifyAdmin = (text) => (ADMIN_ID ? bot.api.sendMessage(ADMIN_ID, text) : null);
 
 // ---------- команды ----------
@@ -82,7 +96,7 @@ bot.command("zapisi", (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return ctx.reply("Эта команда только для мастера.");
   const list = loadBookings().filter((b) => bookingDate(b) > new Date()).sort((a, b) => bookingDate(a) - bookingDate(b));
   if (!list.length) return ctx.reply("Предстоящих записей нет.");
-  ctx.reply("📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service} — ${b.name}`).join("\n"));
+  ctx.reply("📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service} — ${b.name}${b.phone ? `, ${b.phone}` : ""}`).join("\n"));
 });
 
 // ---------- разделы меню ----------
@@ -133,7 +147,7 @@ bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
   saveBookings(list.filter((x) => x !== b));
   await ctx.editMessageText(`Запись на ${prettyDay(b.day)}, ${b.time} отменена.`);
   await ctx.reply("Чем ещё помочь?", { reply_markup: mainMenu });
-  await notifyAdmin(`❌ Запись отменена\n👤 ${b.name}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}`);
+  await notifyAdmin(`❌ Запись отменена\n👤 ${b.name}${b.phone ? `\n📞 ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}`);
 });
 
 // ---------- запись: услуга → день → время → подтверждение ----------
@@ -180,18 +194,66 @@ bot.callbackQuery("confirm", async (ctx) => {
   if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
   if (isTaken(draft.day, draft.time)) return ctx.editMessageText("Ой, это время только что заняли 😔", { reply_markup: new InlineKeyboard().text("⬅️ Заново", "book") });
 
-  const name = ctx.from.first_name + (ctx.from.username ? ` (@${ctx.from.username})` : "");
-  const list = loadBookings();
-  list.push({ id: Math.random().toString(36).slice(2, 9), ...draft, name, userId: ctx.from.id, reminded: false, createdAt: new Date().toISOString() });
-  saveBookings(list);
-  drafts.delete(ctx.from.id);
+  // убираем кнопки «Подтвердить/Отмена», чтобы не нажали второй раз
+  await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}`);
+  const phone = getPhone(ctx.from.id);
+  if (phone) return finishBooking(ctx, draft, phone);
 
-  await ctx.editMessageText(`✅ Ты записан!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}\n\nЖдём тебя: ${ADDRESS}\nНапомню за ${REMIND_BEFORE_HOURS} часа 😉`);
-  await ctx.reply("Чем ещё помочь?", { reply_markup: mainMenu });
-  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${draft.time}`);
+  // номера ещё нет — просим один раз, запись завершится, когда он придёт
+  draft.waitPhone = true;
+  await ctx.reply(
+    "Остался один шаг 👇\nНажми «📱 Отправить мой номер» — мастер сможет позвонить, если что-то изменится. Спрошу только один раз.",
+    { reply_markup: phoneKb },
+  );
 });
 
-bot.on("message:text", (ctx) => ctx.reply("Нажми кнопку ниже 👇", { reply_markup: mainMenu }));
+// сохраняем запись и сообщаем обоим: клиенту и мастеру
+async function finishBooking(ctx, draft, phone) {
+  drafts.delete(ctx.from.id);
+  if (isTaken(draft.day, draft.time)) return ctx.reply("Ой, это время только что заняли 😔 Выбери другое 👇", { reply_markup: mainMenu });
+
+  const name = ctx.from.first_name + (ctx.from.username ? ` (@${ctx.from.username})` : "");
+  const list = loadBookings();
+  list.push({
+    id: Math.random().toString(36).slice(2, 9),
+    service: draft.service, day: draft.day, time: draft.time,
+    name, phone, userId: ctx.from.id, reminded: false, createdAt: new Date().toISOString(),
+  });
+  saveBookings(list);
+
+  await ctx.reply(
+    `✅ Ты записан!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}\n\nЖдём тебя: ${ADDRESS}\nНапомню за ${REMIND_BEFORE_HOURS} часа 😉`,
+    { reply_markup: mainMenu },
+  );
+  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phone}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${draft.time}`);
+}
+
+// клиент нажал «Отправить мой номер»
+bot.on("message:contact", async (ctx) => {
+  const contact = ctx.message.contact;
+  // проверка: номер должен быть от этого же аккаунта, а не пересланный чужой контакт
+  if (contact.user_id !== ctx.from.id) {
+    return ctx.reply("Это чужой контакт 🙂 Нажми кнопку «📱 Отправить мой номер» ниже.", { reply_markup: phoneKb });
+  }
+  const phone = contact.phone_number.startsWith("+") ? contact.phone_number : `+${contact.phone_number}`;
+  savePhone(ctx.from.id, phone);
+  const draft = drafts.get(ctx.from.id);
+  if (draft?.waitPhone) return finishBooking(ctx, draft, phone);
+  await ctx.reply("Номер сохранён 👍", { reply_markup: mainMenu });
+});
+
+bot.hears(PHONE_CANCEL, async (ctx) => {
+  drafts.delete(ctx.from.id);
+  await ctx.reply("Запись отменена.", { reply_markup: mainMenu });
+});
+
+bot.on("message:text", (ctx) => {
+  // пока ждём номер, напоминаем про кнопку (номер, набранный руками, не проверить)
+  if (drafts.get(ctx.from.id)?.waitPhone) {
+    return ctx.reply("Нажми кнопку «📱 Отправить мой номер» внизу 👇", { reply_markup: phoneKb });
+  }
+  return ctx.reply("Нажми кнопку ниже 👇", { reply_markup: mainMenu });
+});
 
 // ---------- напоминания ----------
 // Раз в минуту смотрим записи: если до визита осталось меньше REMIND_BEFORE_HOURS часов и ещё не напоминали — напоминаем.
