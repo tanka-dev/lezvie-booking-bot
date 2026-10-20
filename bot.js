@@ -3,7 +3,7 @@
 // .env:  BOT_TOKEN=...   ADMIN_ID=...  (ADMIN_ID — твой Telegram id, узнать командой /myid)
 
 const fs = require("fs");
-const { Bot, InlineKeyboard } = require("grammy");
+const { Bot, InlineKeyboard, Keyboard } = require("grammy");
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const ADMIN_ID = Number(process.env.ADMIN_ID || 0); // кому слать уведомления о записях
@@ -62,17 +62,20 @@ const isTaken = (day, time) => loadBookings().some((b) => b.day === day && b.tim
 const freeHours = (day) =>
   HOURS.filter((h) => !isTaken(day, h) && new Date(`${day}T${h}:00`) > new Date());
 
-const mainMenu = new InlineKeyboard()
-  .text("✂️ Записаться", "book").row()
-  .text("📋 Мои записи", "mine").row()
-  .text("💰 Цены", "prices")
-  .text("📍 Контакты", "contacts");
+// Постоянные кнопки внизу экрана (вместо клавиатуры) — видны всегда, не уезжают вверх с сообщениями
+const BTN = { book: "✂️ Записаться", mine: "📋 Мои записи", prices: "💰 Цены", contacts: "📍 Контакты" };
+const mainMenu = new Keyboard()
+  .text(BTN.book).row()
+  .text(BTN.mine).row()
+  .text(BTN.prices).text(BTN.contacts)
+  .resized()     // кнопки компактные, а не на пол-экрана
+  .persistent(); // не прячутся после нажатия
 
 const notifyAdmin = (text) => (ADMIN_ID ? bot.api.sendMessage(ADMIN_ID, text) : null);
 
 // ---------- команды ----------
 bot.command("start", (ctx) =>
-  ctx.reply(`Привет, ${ctx.from.first_name}! 👋\nЯ бот барбершопа «Лезвие». Чем помочь?`, { reply_markup: mainMenu }),
+  ctx.reply(`Привет, ${ctx.from.first_name}! 👋\nЯ бот барбершопа «Лезвие». Выбери кнопку внизу 👇`, { reply_markup: mainMenu }),
 );
 bot.command("myid", (ctx) => ctx.reply(`Твой id: ${ctx.from.id}`));
 bot.command("zapisi", (ctx) => {
@@ -82,19 +85,20 @@ bot.command("zapisi", (ctx) => {
   ctx.reply("📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service} — ${b.name}`).join("\n"));
 });
 
-// ---------- меню ----------
-bot.callbackQuery("prices", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await ctx.reply("💰 Цены:\n" + SERVICES.map((s) => `• ${s.name} — ${s.price} ₽`).join("\n"), { reply_markup: mainMenu });
-});
-bot.callbackQuery("contacts", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await ctx.reply(`📍 ${ADDRESS}\n🕙 Каждый день 10:00–21:00\n📞 +7 900 000-00-00`, { reply_markup: mainMenu });
-});
+// ---------- разделы меню ----------
+// Каждый раздел — отдельная функция: её вызывают и кнопка внизу, и команда из «Меню», и старые кнопки в сообщениях
+const showPrices = (ctx) =>
+  ctx.reply("💰 Цены:\n" + SERVICES.map((s) => `• ${s.name} — ${s.price} ₽`).join("\n"), { reply_markup: mainMenu });
+const showContacts = (ctx) =>
+  ctx.reply(`📍 ${ADDRESS}\n🕙 Каждый день 10:00–21:00\n📞 +7 900 000-00-00`, { reply_markup: mainMenu });
 
-// ---------- мои записи + отмена ----------
-bot.callbackQuery("mine", async (ctx) => {
-  await ctx.answerCallbackQuery();
+async function showBook(ctx) {
+  const kb = new InlineKeyboard();
+  SERVICES.forEach((s) => kb.text(`${s.name} — ${s.price} ₽`, `svc:${s.id}`).row());
+  await ctx.reply("Выбери услугу:", { reply_markup: kb });
+}
+
+async function showMine(ctx) {
   const mine = loadBookings()
     .filter((b) => b.userId === ctx.from.id && bookingDate(b) > new Date())
     .sort((a, b) => bookingDate(a) - bookingDate(b));
@@ -105,8 +109,22 @@ bot.callbackQuery("mine", async (ctx) => {
     "📋 Твои записи:\n" + mine.map((b) => `• ${prettyDay(b.day)}, ${b.time} — ${b.service}`).join("\n"),
     { reply_markup: kb },
   );
-});
+}
 
+// одна функция — три способа её вызвать
+const sections = [
+  { key: "book", cmd: "zapis", fn: showBook },
+  { key: "mine", cmd: "moi", fn: showMine },
+  { key: "prices", cmd: "ceny", fn: showPrices },
+  { key: "contacts", cmd: "kontakty", fn: showContacts },
+];
+for (const s of sections) {
+  bot.hears(BTN[s.key], s.fn); // кнопка внизу экрана
+  bot.command(s.cmd, s.fn); // команда из «Меню»
+  bot.callbackQuery(s.key, async (ctx) => { await ctx.answerCallbackQuery(); await s.fn(ctx); }); // кнопки в старых сообщениях
+}
+
+// ---------- отмена своей записи ----------
 bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const list = loadBookings();
@@ -119,13 +137,6 @@ bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
 });
 
 // ---------- запись: услуга → день → время → подтверждение ----------
-bot.callbackQuery("book", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const kb = new InlineKeyboard();
-  SERVICES.forEach((s) => kb.text(`${s.name} — ${s.price} ₽`, `svc:${s.id}`).row());
-  await ctx.reply("Выбери услугу:", { reply_markup: kb });
-});
-
 bot.callbackQuery(/^svc:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const service = SERVICES.find((s) => s.id === ctx.match[1]);
@@ -204,7 +215,28 @@ async function sendReminders() {
 }
 setInterval(sendReminders, 60 * 1000);
 
+// ---------- профиль бота в Telegram ----------
+// Кнопка «Меню» слева от поля ввода и текст «Что умеет этот бот?», который видно в пустом чате до нажатия «Старт»
+async function setupProfile() {
+  try {
+    await bot.api.setMyCommands([
+      { command: "zapis", description: "✂️ Записаться" },
+      { command: "moi", description: "📋 Мои записи" },
+      { command: "ceny", description: "💰 Цены" },
+      { command: "kontakty", description: "📍 Контакты" },
+      { command: "start", description: "🏠 Главное меню" },
+    ]);
+    await bot.api.setMyDescription(
+      `Онлайн-запись в барбершоп «Лезвие» ✂️\n\n• Запишись за 30 секунд — без звонков и переписки\n• Видно только свободное время\n• Напомню о визите за ${REMIND_BEFORE_HOURS} часа\n• Отменить запись — в один клик\n\nНажми «Старт» 👇`,
+    );
+    await bot.api.setMyShortDescription("Онлайн-запись в барбершоп «Лезвие» — без звонков, с напоминанием о визите.");
+  } catch (e) {
+    console.error("Не удалось обновить профиль бота:", e.message);
+  }
+}
+
 bot.catch((err) => console.error("Ошибка:", err.message));
+setupProfile();
 bot.start();
 sendReminders();
 console.log("Бот запущен! Открой его в Telegram и напиши /start");
