@@ -34,11 +34,20 @@ const saveBookings = (list) => fs.writeFileSync(FILE, JSON.stringify(list, null,
 // ---------- телефоны клиентов (users.json): спрашиваем один раз, дальше помним ----------
 const USERS_FILE = "users.json";
 const loadUsers = () => (fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE, "utf8")) : {});
-const getPhone = (userId) => loadUsers()[userId]?.phone;
-function savePhone(userId, phone) {
+const getUser = (userId) => loadUsers()[userId]; // { phone, verified }
+// verified = true — номер пришёл кнопкой из Telegram (точно настоящий), false — клиент написал сам
+function savePhone(userId, phone, verified) {
   const users = loadUsers();
-  users[userId] = { phone };
+  users[userId] = { phone, verified };
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+// номер, набранный руками → "+79001234567" или null, если на номер не похоже
+function parsePhone(text) {
+  const digits = text.replace(/\D/g, "");
+  if (digits.length === 11 && (digits[0] === "7" || digits[0] === "8")) return "+7" + digits.slice(1);
+  if (digits.length === 10 && digits[0] === "9") return "+7" + digits;
+  if (text.trim().startsWith("+") && digits.length >= 10 && digits.length <= 15) return "+" + digits; // номера других стран
+  return null;
 }
 
 const drafts = new Map(); // черновик записи, пока человек выбирает
@@ -82,8 +91,11 @@ const mainMenu = new Keyboard()
   .persistent(); // не прячутся после нажатия
 
 // Кнопка «Отправить номер»: Telegram сам подставляет номер аккаунта — его нельзя выдумать или ввести с ошибкой
-const PHONE_CANCEL = "❌ Отмена записи";
-const phoneKb = new Keyboard().requestContact("📱 Отправить мой номер").row().text(PHONE_CANCEL).resized();
+// «Ввести другой номер» — если звонить нужно не на тот номер, к которому привязан Telegram
+const PHONE_MANUAL = "✏️ Ввести другой номер";
+const PHONE_CANCEL = "❌ Отмена";
+const phoneKb = new Keyboard().requestContact("📱 Отправить мой номер").row().text(PHONE_MANUAL).row().text(PHONE_CANCEL).resized();
+const phoneChange = new Set(); // кто сейчас меняет номер командой /nomer (без записи)
 
 const notifyAdmin = (text) => (ADMIN_ID ? bot.api.sendMessage(ADMIN_ID, text) : null);
 
@@ -196,19 +208,23 @@ bot.callbackQuery("confirm", async (ctx) => {
 
   // убираем кнопки «Подтвердить/Отмена», чтобы не нажали второй раз
   await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}`);
-  const phone = getPhone(ctx.from.id);
-  if (phone) return finishBooking(ctx, draft, phone);
+  if (getUser(ctx.from.id)?.phone) return finishBooking(ctx, draft);
 
   // номера ещё нет — просим один раз, запись завершится, когда он придёт
   draft.waitPhone = true;
   await ctx.reply(
-    "Остался один шаг 👇\nНажми «📱 Отправить мой номер» — мастер сможет позвонить, если что-то изменится. Спрошу только один раз.",
+    "Остался один шаг 👇\nНажми «📱 Отправить мой номер» — мастер сможет позвонить, если что-то изменится.\nЕсли звонить лучше на другой номер — нажми «✏️ Ввести другой номер». Спрошу только один раз.",
     { reply_markup: phoneKb },
   );
 });
 
+// номер с пометкой для мастера: настоящий из Telegram или написанный клиентом
+const phoneLine = (u) => `${u.phone} ${u.verified ? "(из Telegram ✅)" : "(указал сам)"}`;
+
 // сохраняем запись и сообщаем обоим: клиенту и мастеру
-async function finishBooking(ctx, draft, phone) {
+async function finishBooking(ctx, draft) {
+  const user = getUser(ctx.from.id);
+  const phone = user.phone;
   drafts.delete(ctx.from.id);
   if (isTaken(draft.day, draft.time)) return ctx.reply("Ой, это время только что заняли 😔 Выбери другое 👇", { reply_markup: mainMenu });
 
@@ -225,7 +241,19 @@ async function finishBooking(ctx, draft, phone) {
     `✅ Ты записан!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${draft.time}\n\nЖдём тебя: ${ADDRESS}\nНапомню за ${REMIND_BEFORE_HOURS} часа 😉`,
     { reply_markup: mainMenu },
   );
-  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phone}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${draft.time}`);
+  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phoneLine(user)}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${draft.time}`);
+}
+
+// ждём ли мы от человека номер: при записи или при смене номера
+const waitingPhone = (id) => drafts.get(id)?.waitPhone || phoneChange.has(id);
+
+// номер получен (кнопкой или текстом) — сохраняем и продолжаем то, что человек делал
+async function phoneReceived(ctx, phone, verified) {
+  savePhone(ctx.from.id, phone, verified);
+  phoneChange.delete(ctx.from.id);
+  const draft = drafts.get(ctx.from.id);
+  if (draft?.waitPhone) return finishBooking(ctx, draft);
+  await ctx.reply(`Номер сохранён 👍 ${phone}`, { reply_markup: mainMenu });
 }
 
 // клиент нажал «Отправить мой номер»
@@ -233,24 +261,35 @@ bot.on("message:contact", async (ctx) => {
   const contact = ctx.message.contact;
   // проверка: номер должен быть от этого же аккаунта, а не пересланный чужой контакт
   if (contact.user_id !== ctx.from.id) {
-    return ctx.reply("Это чужой контакт 🙂 Нажми кнопку «📱 Отправить мой номер» ниже.", { reply_markup: phoneKb });
+    return ctx.reply("Это чужой контакт 🙂 Нажми «📱 Отправить мой номер» или «✏️ Ввести другой номер».", { reply_markup: phoneKb });
   }
   const phone = contact.phone_number.startsWith("+") ? contact.phone_number : `+${contact.phone_number}`;
-  savePhone(ctx.from.id, phone);
-  const draft = drafts.get(ctx.from.id);
-  if (draft?.waitPhone) return finishBooking(ctx, draft, phone);
-  await ctx.reply("Номер сохранён 👍", { reply_markup: mainMenu });
+  await phoneReceived(ctx, phone, true);
 });
+
+bot.hears(PHONE_MANUAL, (ctx) =>
+  ctx.reply("Напиши номер, на который тебе звонить, например: +7 900 123-45-67", { reply_markup: phoneKb }),
+);
 
 bot.hears(PHONE_CANCEL, async (ctx) => {
-  drafts.delete(ctx.from.id);
-  await ctx.reply("Запись отменена.", { reply_markup: mainMenu });
+  const hadDraft = drafts.delete(ctx.from.id);
+  phoneChange.delete(ctx.from.id);
+  await ctx.reply(hadDraft ? "Запись отменена." : "Хорошо, номер не меняю.", { reply_markup: mainMenu });
 });
 
-bot.on("message:text", (ctx) => {
-  // пока ждём номер, напоминаем про кнопку (номер, набранный руками, не проверить)
-  if (drafts.get(ctx.from.id)?.waitPhone) {
-    return ctx.reply("Нажми кнопку «📱 Отправить мой номер» внизу 👇", { reply_markup: phoneKb });
+// /nomer — поменять сохранённый номер
+bot.command("nomer", (ctx) => {
+  phoneChange.add(ctx.from.id);
+  const u = getUser(ctx.from.id);
+  return ctx.reply(`${u?.phone ? `Сейчас у тебя номер ${u.phone}.\n` : ""}Отправь новый номер кнопкой или напиши его 👇`, { reply_markup: phoneKb });
+});
+
+bot.on("message:text", async (ctx) => {
+  // пока ждём номер, пробуем понять его из текста
+  if (waitingPhone(ctx.from.id)) {
+    const phone = parsePhone(ctx.message.text);
+    if (phone) return phoneReceived(ctx, phone, false);
+    return ctx.reply("Не похоже на номер 🤔 Напиши так: +7 900 123-45-67 — или нажми «📱 Отправить мой номер».", { reply_markup: phoneKb });
   }
   return ctx.reply("Нажми кнопку ниже 👇", { reply_markup: mainMenu });
 });
@@ -286,6 +325,7 @@ async function setupProfile() {
       { command: "moi", description: "📋 Мои записи" },
       { command: "ceny", description: "💰 Цены" },
       { command: "kontakty", description: "📍 Контакты" },
+      { command: "nomer", description: "📞 Изменить номер телефона" },
       { command: "start", description: "🏠 Главное меню" },
     ]);
     await bot.api.setMyDescription(
