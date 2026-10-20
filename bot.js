@@ -1,15 +1,20 @@
 // Бот записи клиентов для мастера (барбершоп «Лезвие»).
 // Запуск:  node --env-file=.env bot.js
-// .env:  BOT_TOKEN=...   ADMIN_ID=...  (ADMIN_ID — твой Telegram id, узнать командой /myid)
+// .env:  BOT_TOKEN=...   ADMIN_ID=...  (ADMIN_ID — Telegram id мастера, узнать командой /myid)
 
 const fs = require("fs");
 const { Bot, InlineKeyboard, Keyboard } = require("grammy");
 
 const bot = new Bot(process.env.BOT_TOKEN);
-const ADMIN_ID = Number(process.env.ADMIN_ID || 0); // кому слать уведомления о записях
+const ADMIN_ID = Number(process.env.ADMIN_ID || 0); // мастер: получает уведомления и видит /master
 
-// ---------- настройки мастера (их меняют под каждого клиента-заказчика) ----------
-// minutes — сколько длится услуга: бот не даст записать следующего клиента, пока этот не закончит
+// ======================= НАСТРОЙКИ МАСТЕРА =======================
+// Под нового заказчика меняется только этот блок.
+const SALON = "барбершоп «Лезвие»";
+const CITY = "Рязань";
+const ADDRESS = "ул. Пушкина, 10";
+const SALON_PHONE = "+7 900 000-00-00";
+// minutes — сколько длится услуга: следующего клиента бот не запишет, пока этот не закончит
 const SERVICES = [
   { id: "cut", name: "Стрижка", price: 1000, minutes: 60 },
   { id: "beard", name: "Борода", price: 600, minutes: 30 },
@@ -26,31 +31,41 @@ const SCHEDULE = {
   вс: null,
 };
 const STEP_MINUTES = 30; // шаг записи: 10:00, 10:30, 11:00…
-const DAYS_AHEAD = 5; // на сколько дней вперёд можно записаться
-const REMIND_BEFORE_HOURS = 2; // за сколько часов напоминать клиенту
-const ADDRESS = "ул. Пушкина, 10";
+const DAYS_AHEAD = 7; // на сколько дней вперёд можно записаться
+const MAX_ACTIVE = 2; // сколько будущих записей может быть у одного клиента (защита от шутников)
+const DAY_REMIND_AT = "18:00"; // во сколько накануне спрашивать «Придёте?»
+const REMIND_BEFORE_HOURS = 2; // за сколько часов до визита напомнить ещё раз
+const DIGEST_AT = "09:00"; // во сколько мастеру приходит сводка на день
+// ссылка для отзывов (лучше — прямая ссылка на карточку салона в Яндекс Картах или 2ГИС); "" — не просить отзыв
+const REVIEW_LINK = `https://yandex.ru/maps/?text=${encodeURIComponent(`${SALON} ${CITY}`)}`;
+const REVIEW_AFTER_HOURS = 2; // через сколько часов после визита попросить отзыв
+const MAP_LINK = `https://yandex.ru/maps/?text=${encodeURIComponent(`${CITY}, ${ADDRESS}`)}`;
+// =================================================================
 
-// ---------- хранение записей в файле bookings.json ----------
+// ---------- хранение данных в файлах ----------
+const readJson = (file, empty) => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : empty);
+const writeJson = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2));
+
+// записи — bookings.json
 const FILE = "bookings.json";
 function loadBookings() {
-  const list = fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, "utf8")) : [];
+  const list = readJson(FILE, []);
   // у старых записей могло не быть id — выдаём и сразу сохраняем, иначе при каждом чтении id будет новый
   const noId = list.filter((b) => !b.id);
   noId.forEach((b) => { b.id = Math.random().toString(36).slice(2, 9); });
-  if (noId.length) fs.writeFileSync(FILE, JSON.stringify(list, null, 2));
+  if (noId.length) writeJson(FILE, list);
   return list;
 }
-const saveBookings = (list) => fs.writeFileSync(FILE, JSON.stringify(list, null, 2));
+const saveBookings = (list) => writeJson(FILE, list);
 
-// ---------- телефоны клиентов (users.json): спрашиваем один раз, дальше помним ----------
+// телефоны клиентов — users.json: спрашиваем один раз, дальше помним
 const USERS_FILE = "users.json";
-const loadUsers = () => (fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE, "utf8")) : {});
-const getUser = (userId) => loadUsers()[userId]; // { phone, verified }
+const getUser = (userId) => readJson(USERS_FILE, {})[userId]; // { phone, verified }
 // verified = true — номер пришёл кнопкой из Telegram (точно настоящий), false — клиент написал сам
 function savePhone(userId, phone, verified) {
-  const users = loadUsers();
+  const users = readJson(USERS_FILE, {});
   users[userId] = { phone, verified };
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  writeJson(USERS_FILE, users);
 }
 // номер, набранный руками → "+79001234567" или null, если на номер не похоже
 function parsePhone(text) {
@@ -61,6 +76,21 @@ function parsePhone(text) {
   return null;
 }
 
+// выходные и закрытые часы — closed.json (мастер управляет сам через /master)
+const CLOSED_FILE = "closed.json";
+const loadClosed = () => readJson(CLOSED_FILE, { days: [], slots: [] });
+const saveClosed = (c) => writeJson(CLOSED_FILE, c);
+const isDayClosed = (day) => loadClosed().days.includes(day);
+const isSlotClosed = (day, time) => {
+  const c = loadClosed();
+  return c.days.includes(day) || c.slots.includes(`${day} ${time}`);
+};
+
+// служебное — state.json (например, в какой день уже отправили сводку мастеру)
+const STATE_FILE = "state.json";
+const loadState = () => readJson(STATE_FILE, {});
+const saveState = (s) => writeJson(STATE_FILE, s);
+
 const drafts = new Map(); // черновик записи, пока человек выбирает
 
 // ---------- даты ----------
@@ -68,35 +98,27 @@ const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
 const MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 // "2026-10-21" из локальной даты (не через toISOString — тот даёт время по Гринвичу и ночью ошибается на день)
 const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const dayAfter = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return isoDay(d); }; // 0 — сегодня, 1 — завтра
 // "чт, 21 октября" — как удобно читать человеку
 function prettyDay(iso) {
   const [y, m, d] = iso.split("-").map(Number);
   const date = new Date(y, m - 1, d);
   return `${WEEKDAYS[date.getDay()]}, ${d} ${MONTHS[m - 1]}`;
 }
+const shortDay = (iso) => prettyDay(iso).replace(/ [а-я]+$/, "").replace(",", ""); // "ср 21"
 // дата + время записи как объект Date (по местному времени)
 const bookingDate = (b) => new Date(`${b.day}T${b.time}:00`);
+// сейчас уже позже, чем "18:00" сегодня?
+const nowAfter = (hhmm) => { const n = new Date(); return n.getHours() * 60 + n.getMinutes() >= toMin(hhmm); };
 
 function nextDays(count = DAYS_AHEAD) {
   const out = [];
   for (let i = 0; i < count; i++) {
-    const d = new Date();
-    d.setDate(d.getDate() + i);
-    const iso = isoDay(d);
+    const iso = dayAfter(i);
     out.push({ iso, label: i === 0 ? "Сегодня" : i === 1 ? "Завтра" : prettyDay(iso) });
   }
   return out;
 }
-
-// ---------- выходные и закрытые часы (closed.json) — мастер управляет сам через /master ----------
-const CLOSED_FILE = "closed.json";
-const loadClosed = () => (fs.existsSync(CLOSED_FILE) ? JSON.parse(fs.readFileSync(CLOSED_FILE, "utf8")) : { days: [], slots: [] });
-const saveClosed = (c) => fs.writeFileSync(CLOSED_FILE, JSON.stringify(c, null, 2));
-const isDayClosed = (day) => loadClosed().days.includes(day);
-const isSlotClosed = (day, time) => {
-  const c = loadClosed();
-  return c.days.includes(day) || c.slots.includes(`${day} ${time}`);
-};
 
 // ---------- время, график и длительность ----------
 const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; }; // "10:30" → 630
@@ -104,6 +126,7 @@ const toTime = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m
 // 90 → "1 ч 30 мин"
 const durText = (min) => [Math.floor(min / 60) && `${Math.floor(min / 60)} ч`, min % 60 && `${min % 60} мин`].filter(Boolean).join(" ");
 const durOf = (b) => b.minutes || 60; // у старых записей длительности нет — считаем час
+const endDate = (b) => new Date(bookingDate(b).getTime() + durOf(b) * 60000);
 const timeRange = (b) => `${b.time}–${toTime(toMin(b.time) + durOf(b))}`; // "10:00–11:30"
 
 const weekdayOf = (iso) => { const [y, m, d] = iso.split("-").map(Number); return WEEKDAYS[new Date(y, m - 1, d).getDay()]; };
@@ -154,6 +177,10 @@ function scheduleText() {
   return parts.join("\n🕙 ");
 }
 
+const upcoming = () => loadBookings().filter((b) => bookingDate(b) > new Date()).sort((a, b) => bookingDate(a) - bookingDate(b));
+const myUpcoming = (userId) => upcoming().filter((b) => b.userId === userId);
+
+// ---------- клавиатуры ----------
 // Постоянные кнопки внизу экрана (вместо клавиатуры) — видны всегда, не уезжают вверх с сообщениями
 const BTN = { book: "✂️ Записаться", mine: "📋 Мои записи", prices: "💰 Цены", contacts: "📍 Контакты" };
 const mainMenu = new Keyboard()
@@ -170,27 +197,28 @@ const PHONE_CANCEL = "❌ Отмена";
 const phoneKb = new Keyboard().requestContact("📱 Отправить мой номер").row().text(PHONE_MANUAL).row().text(PHONE_CANCEL).resized();
 const phoneChange = new Set(); // кто сейчас меняет номер командой /nomer (без записи)
 
-const notifyAdmin = (text) => (ADMIN_ID ? bot.api.sendMessage(ADMIN_ID, text) : null);
+const notifyAdmin = (text) => (ADMIN_ID ? bot.api.sendMessage(ADMIN_ID, text).catch((e) => console.error("Мастеру не отправилось:", e.message)) : null);
+// редактируем сообщение; ошибку «текст не изменился» спокойно пропускаем
+const edit = (ctx, text, kb) => ctx.editMessageText(text, { reply_markup: kb }).catch(() => {});
+const isAdmin = (ctx) => ctx.from.id === ADMIN_ID;
 
 // ---------- команды ----------
 bot.command("start", (ctx) =>
-  ctx.reply(`Привет, ${ctx.from.first_name}! 👋\nЯ бот барбершопа «Лезвие». Выбери кнопку внизу 👇`, { reply_markup: mainMenu }),
+  ctx.reply(`Здравствуйте, ${ctx.from.first_name}! 👋\nЯ бот онлайн-записи в ${SALON}. Выберите кнопку внизу 👇`, { reply_markup: mainMenu }),
 );
-bot.command("myid", (ctx) => ctx.reply(`Твой id: ${ctx.from.id}`));
-// ---------- панель мастера: /master ----------
-const isAdmin = (ctx) => ctx.from.id === ADMIN_ID;
-const MASTER_DAYS = 14; // на сколько дней вперёд мастер видит график
-const upcoming = () => loadBookings().filter((b) => bookingDate(b) > new Date()).sort((a, b) => bookingDate(a) - bookingDate(b));
-const shortDay = (iso) => prettyDay(iso).replace(/ [а-я]+$/, "").replace(",", ""); // "ср 21"
+bot.command("myid", (ctx) => ctx.reply(`Ваш id: ${ctx.from.id}`));
 
+// ---------- панель мастера: /master ----------
+const MASTER_DAYS = 14; // на сколько дней вперёд мастер видит график
 const masterKb = new InlineKeyboard().text("📋 Записи", "adm:list").row().text("🗓 График и выходные", "adm:days");
 bot.command("master", (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Эта команда только для мастера.");
   return ctx.reply("🛠 Панель мастера", { reply_markup: masterKb });
 });
 
-// редактируем сообщение; ошибку «текст не изменился» спокойно пропускаем
-const edit = (ctx, text, kb) => ctx.editMessageText(text, { reply_markup: kb }).catch(() => {});
+// строка записи для мастера; ✅ — клиент подтвердил, что придёт
+const adminLine = (b) =>
+  `${timeRange(b)} — ${b.service} — ${b.name}${b.phone ? `, ${b.phone}` : ""}${b.confirmed ? " ✅ подтвердил" : ""}`;
 
 // список записей с кнопками отмены
 function listView() {
@@ -199,7 +227,7 @@ function listView() {
   list.forEach((b) => kb.text(`❌ ${shortDay(b.day)}, ${b.time} — ${b.name.split(" ")[0]}`, `adel:${b.id}`).row());
   kb.text("⬅️ Назад", "adm:menu");
   const text = list.length
-    ? "📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${timeRange(b)} — ${b.service} — ${b.name}${b.phone ? `, ${b.phone}` : ""}`).join("\n") + "\n\nНажми на запись, чтобы отменить её."
+    ? "📋 Предстоящие записи:\n" + list.map((b) => `• ${prettyDay(b.day)}, ${adminLine(b)}`).join("\n") + "\n\nНажми на запись, чтобы отменить её."
     : "Предстоящих записей нет.";
   return { text, kb };
 }
@@ -222,7 +250,7 @@ function daysView() {
   return { text: "🗓 Выбери день, чтобы закрыть его или отдельные часы:", kb };
 }
 
-// один день: часы с состояниями
+// один день: клеточки времени с состояниями
 function dayView(iso) {
   if (!workHours(iso)) {
     return {
@@ -241,7 +269,7 @@ function dayView(iso) {
   kb.row();
   kb.text(closedDay ? "✅ Сделать рабочим" : "🚫 Сделать выходным", `${closedDay ? "aopen" : "aclose"}:${iso}`).row();
   kb.text("⬅️ К списку дней", "adm:days");
-  const text = `📅 ${prettyDay(iso)}${closedDay ? " — ВЫХОДНОЙ" : ""}\n✅ свободно · 👤 запись · 🚫 закрыто\nНажми на час, чтобы закрыть или открыть его.`;
+  const text = `📅 ${prettyDay(iso)}${closedDay ? " — ВЫХОДНОЙ" : ""}\n✅ свободно · 👤 запись · 🚫 закрыто\nНажми на время, чтобы закрыть или открыть его.`;
   return { text, kb };
 }
 
@@ -273,13 +301,17 @@ bot.callbackQuery(/^adelok:(.+)$/, async (ctx) => {
   const v = listView();
   await edit(ctx, `✅ Отменил: ${prettyDay(b.day)}, ${b.time} — ${b.name}\n\n` + v.text, v.kb);
   try {
-    await bot.api.sendMessage(b.userId, `😔 К сожалению, мастер отменил твою запись:\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}\n\nВыбери другое время — нажми «✂️ Записаться» 👇`, { reply_markup: mainMenu });
+    await bot.api.sendMessage(
+      b.userId,
+      `😔 К сожалению, мастер отменил вашу запись:\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}\n\nВыберите другое время — нажмите «✂️ Записаться» 👇`,
+      { reply_markup: mainMenu },
+    );
   } catch (e) {
     await notifyAdmin(`⚠️ Не удалось написать клиенту ${b.name} (возможно, он заблокировал бота). Позвони: ${b.phone || "номера нет"}`);
   }
 });
 
-// закрыть/открыть отдельный час
+// закрыть/открыть отдельное время
 bot.callbackQuery(/^aslot:(.+)\|(.+)$/, async (ctx) => {
   const [, iso, h] = ctx.match;
   if (bookingAt(iso, h)) return ctx.answerCallbackQuery({ text: "На это время есть запись. Отмени её в «📋 Записи».", show_alert: true });
@@ -320,24 +352,34 @@ bot.callbackQuery(/^aopen:(.+)$/, async (ctx) => {
 // Каждый раздел — отдельная функция: её вызывают и кнопка внизу, и команда из «Меню», и старые кнопки в сообщениях
 const showPrices = (ctx) =>
   ctx.reply("💰 Цены:\n" + SERVICES.map((s) => `• ${s.name} — ${s.price} ₽ (${durText(s.minutes)})`).join("\n"), { reply_markup: mainMenu });
+
+// контакты + кнопка, которая открывает адрес в Яндекс Картах
 const showContacts = (ctx) =>
-  ctx.reply(`📍 ${ADDRESS}\n🕙 ${scheduleText()}\n📞 +7 900 000-00-00`, { reply_markup: mainMenu });
+  ctx.reply(`📍 ${CITY}, ${ADDRESS}\n🕙 ${scheduleText()}\n📞 ${SALON_PHONE}`, {
+    reply_markup: new InlineKeyboard().url("🗺 Как добраться — открыть карту", MAP_LINK),
+  });
 
 async function showBook(ctx) {
+  // защита от шутников: не больше MAX_ACTIVE будущих записей на человека (мастера не ограничиваем)
+  const mine = myUpcoming(ctx.from.id);
+  if (!isAdmin(ctx) && mine.length >= MAX_ACTIVE) {
+    return ctx.reply(
+      `У вас уже ${mine.length} записи — это максимум 🙂\nЧтобы записаться ещё раз, отмените одну из них в «📋 Мои записи».`,
+      { reply_markup: mainMenu },
+    );
+  }
   const kb = new InlineKeyboard();
   SERVICES.forEach((s) => kb.text(`${s.name} — ${s.price} ₽ · ${durText(s.minutes)}`, `svc:${s.id}`).row());
-  await ctx.reply("Выбери услугу:", { reply_markup: kb });
+  await ctx.reply("Выберите услугу:", { reply_markup: kb });
 }
 
 async function showMine(ctx) {
-  const mine = loadBookings()
-    .filter((b) => b.userId === ctx.from.id && bookingDate(b) > new Date())
-    .sort((a, b) => bookingDate(a) - bookingDate(b));
-  if (!mine.length) return ctx.reply("У тебя нет предстоящих записей.", { reply_markup: mainMenu });
+  const mine = myUpcoming(ctx.from.id);
+  if (!mine.length) return ctx.reply("У вас нет предстоящих записей.", { reply_markup: mainMenu });
   const kb = new InlineKeyboard();
   mine.forEach((b) => kb.text(`❌ Отменить ${prettyDay(b.day)}, ${b.time}`, `del:${b.id}`).row());
   await ctx.reply(
-    "📋 Твои записи:\n" + mine.map((b) => `• ${prettyDay(b.day)}, ${timeRange(b)} — ${b.service}`).join("\n"),
+    "📋 Ваши записи:\n" + mine.map((b) => `• ${prettyDay(b.day)}, ${timeRange(b)} — ${b.service}`).join("\n"),
     { reply_markup: kb },
   );
 }
@@ -352,77 +394,90 @@ const sections = [
 for (const s of sections) {
   bot.hears(BTN[s.key], s.fn); // кнопка внизу экрана
   bot.command(s.cmd, s.fn); // команда из «Меню»
-  bot.callbackQuery(s.key, async (ctx) => { await ctx.answerCallbackQuery(); await s.fn(ctx); }); // кнопки в старых сообщениях
+  bot.callbackQuery(s.key, async (ctx) => { await ctx.answerCallbackQuery(); await s.fn(ctx); }); // кнопки в сообщениях
 }
 
-// ---------- отмена своей записи ----------
+// ---------- клиент отменяет свою запись (из «Мои записи» или из напоминания) ----------
 bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const list = loadBookings();
   const b = list.find((x) => x.id === ctx.match[1] && x.userId === ctx.from.id); // отменить можно только свою
-  if (!b) return ctx.editMessageText("Эта запись уже отменена.");
+  if (!b) return edit(ctx, "Эта запись уже отменена.");
   saveBookings(list.filter((x) => x !== b));
-  await ctx.editMessageText(`Запись на ${prettyDay(b.day)}, ${b.time} отменена.`);
-  await ctx.reply("Чем ещё помочь?", { reply_markup: mainMenu });
-  await notifyAdmin(`❌ Запись отменена\n👤 ${b.name}${b.phone ? `\n📞 ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${b.time}`);
+  await edit(ctx, `Запись на ${prettyDay(b.day)}, ${b.time} отменена.`);
+  await ctx.reply("Хорошо, запись отменена. Будем рады видеть вас в другой раз! 👇", { reply_markup: mainMenu });
+  await notifyAdmin(`❌ Клиент отменил запись\n👤 ${b.name}${b.phone ? `\n📞 ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${timeRange(b)}`);
+});
+
+// ---------- клиент подтверждает визит (кнопка из напоминания накануне) ----------
+bot.callbackQuery(/^cfm:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const list = loadBookings();
+  const b = list.find((x) => x.id === ctx.match[1] && x.userId === ctx.from.id);
+  if (!b) return edit(ctx, "Эта запись уже отменена.");
+  if (b.confirmed) return;
+  b.confirmed = true;
+  saveBookings(list);
+  await edit(ctx, `Отлично, ждём вас ${prettyDay(b.day)} в ${b.time}! 💈\n📍 ${ADDRESS}`);
+  await notifyAdmin(`✅ Клиент подтвердил визит\n👤 ${b.name}\n📅 ${prettyDay(b.day)}, ${timeRange(b)} — ${b.service}`);
 });
 
 // ---------- запись: услуга → день → время → подтверждение ----------
 bot.callbackQuery(/^svc:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const service = SERVICES.find((s) => s.id === ctx.match[1]);
-  if (!service) return ctx.reply("Эта услуга больше недоступна. Выбери заново 👇", { reply_markup: mainMenu });
+  if (!service) return ctx.reply("Эта услуга больше недоступна. Выберите заново 👇", { reply_markup: mainMenu });
   drafts.set(ctx.from.id, { service: service.name, minutes: service.minutes });
   // показываем только дни, где есть свободное время под эту услугу (выходные и занятые дни скрыты)
   const days = nextDays().filter((d) => freeStarts(d.iso, service.minutes).length);
-  if (!days.length) return ctx.editMessageText(`✂️ ${service.name}\nНа ближайшие дни свободного времени нет 😔 Загляни позже или позвони: ${ADDRESS}`);
+  if (!days.length) return edit(ctx, `✂️ ${service.name}\nНа ближайшие дни свободного времени нет 😔 Позвоните нам: ${SALON_PHONE}`);
   const kb = new InlineKeyboard();
   days.forEach((d, i) => { kb.text(d.label, `day:${d.iso}`); if (i % 2 === 1) kb.row(); });
-  await ctx.editMessageText(`✂️ ${service.name}\nВыбери день:`, { reply_markup: kb });
+  await edit(ctx, `✂️ ${service.name}\nВыберите день:`, kb);
 });
 
 bot.callbackQuery(/^day:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const draft = drafts.get(ctx.from.id);
-  if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
+  if (!draft) return ctx.reply("Начните запись заново 👇", { reply_markup: mainMenu });
   draft.day = ctx.match[1];
   const free = freeStarts(draft.day, draft.minutes);
-  if (!free.length) return ctx.editMessageText(`На ${prettyDay(draft.day)} свободного времени нет 😔`, { reply_markup: new InlineKeyboard().text("⬅️ Выбрать другой день", "book") });
+  if (!free.length) return edit(ctx, `На ${prettyDay(draft.day)} свободного времени нет 😔`, new InlineKeyboard().text("⬅️ Выбрать другой день", "book"));
   const kb = new InlineKeyboard();
   free.forEach((h, i) => { kb.text(h, `time:${h}`); if (i % 4 === 3) kb.row(); });
-  await ctx.editMessageText(`✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\nВыбери время:`, { reply_markup: kb });
+  await edit(ctx, `✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\nВыберите время:`, kb);
 });
 
 bot.callbackQuery(/^time:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const draft = drafts.get(ctx.from.id);
-  if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
+  if (!draft) return ctx.reply("Начните запись заново 👇", { reply_markup: mainMenu });
   draft.time = ctx.match[1];
   const kb = new InlineKeyboard().text("✅ Подтвердить", "confirm").text("❌ Отмена", "cancel");
-  await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}`, { reply_markup: kb });
+  await edit(ctx, `Проверьте запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}`, kb);
 });
 
 bot.callbackQuery("cancel", async (ctx) => {
   await ctx.answerCallbackQuery();
   drafts.delete(ctx.from.id);
-  await ctx.editMessageText("Запись отменена.");
+  await edit(ctx, "Запись отменена.");
   await ctx.reply("Чем ещё помочь?", { reply_markup: mainMenu });
 });
 
 bot.callbackQuery("confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
   const draft = drafts.get(ctx.from.id);
-  if (!draft) return ctx.reply("Начни запись заново 👇", { reply_markup: mainMenu });
-  if (!canStart(draft.day, draft.time, draft.minutes)) return ctx.editMessageText("Ой, это время только что заняли 😔", { reply_markup: new InlineKeyboard().text("⬅️ Заново", "book") });
+  if (!draft) return ctx.reply("Начните запись заново 👇", { reply_markup: mainMenu });
+  if (!canStart(draft.day, draft.time, draft.minutes)) return edit(ctx, "Ой, это время только что заняли 😔", new InlineKeyboard().text("⬅️ Выбрать другое", "book"));
 
   // убираем кнопки «Подтвердить/Отмена», чтобы не нажали второй раз
-  await ctx.editMessageText(`Проверь запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}`);
+  await edit(ctx, `Проверьте запись:\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}`);
   if (getUser(ctx.from.id)?.phone) return finishBooking(ctx, draft);
 
   // номера ещё нет — просим один раз, запись завершится, когда он придёт
   draft.waitPhone = true;
   await ctx.reply(
-    "Остался один шаг 👇\nНажми «📱 Отправить мой номер» — мастер сможет позвонить, если что-то изменится.\nЕсли звонить лучше на другой номер — нажми «✏️ Ввести другой номер». Спрошу только один раз.",
+    "Остался один шаг 👇\nНажмите «📱 Отправить мой номер» — мастер сможет позвонить, если что-то изменится.\nЕсли звонить лучше на другой номер — нажмите «✏️ Ввести другой номер». Спросим только один раз.",
     { reply_markup: phoneKb },
   );
 });
@@ -433,26 +488,33 @@ const phoneLine = (u) => `${u.phone} ${u.verified ? "(из Telegram ✅)" : "(у
 // сохраняем запись и сообщаем обоим: клиенту и мастеру
 async function finishBooking(ctx, draft) {
   const user = getUser(ctx.from.id);
-  const phone = user.phone;
   drafts.delete(ctx.from.id);
-  if (!canStart(draft.day, draft.time, draft.minutes)) return ctx.reply("Ой, это время только что заняли 😔 Выбери другое 👇", { reply_markup: mainMenu });
+  if (!canStart(draft.day, draft.time, draft.minutes)) return ctx.reply("Ой, это время только что заняли 😔 Выберите другое 👇", { reply_markup: mainMenu });
+  if (!isAdmin(ctx) && myUpcoming(ctx.from.id).length >= MAX_ACTIVE) {
+    return ctx.reply(`У вас уже ${MAX_ACTIVE} записи — это максимум. Отмените одну в «📋 Мои записи».`, { reply_markup: mainMenu });
+  }
 
   const name = ctx.from.first_name + (ctx.from.username ? ` (@${ctx.from.username})` : "");
+  // напоминание «Придёте?» шлём накануне в DAY_REMIND_AT; если записались позже — уже не нужно
+  const tooLateForDayRemind = draft.day === dayAfter(0) || (draft.day === dayAfter(1) && nowAfter(DAY_REMIND_AT));
   const list = loadBookings();
   list.push({
     id: Math.random().toString(36).slice(2, 9),
     service: draft.service, minutes: draft.minutes, day: draft.day, time: draft.time,
-    name, phone, userId: ctx.from.id, reminded: false, createdAt: new Date().toISOString(),
+    name, phone: user.phone, userId: ctx.from.id,
+    dayReminded: tooLateForDayRemind, reminded: false, reviewAsked: false, confirmed: false,
+    createdAt: new Date().toISOString(),
   });
   saveBookings(list);
 
   await ctx.reply(
-    `✅ Ты записан!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}\n\nЖдём тебя: ${ADDRESS}\nНапомню за ${REMIND_BEFORE_HOURS} часа 😉`,
+    `✅ Вы записаны!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}\n\nЖдём вас: ${ADDRESS}\nНапомним о визите заранее 😉`,
     { reply_markup: mainMenu },
   );
   await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phoneLine(user)}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${timeRange(draft)}`);
 }
 
+// ---------- номер телефона ----------
 // ждём ли мы от человека номер: при записи или при смене номера
 const waitingPhone = (id) => drafts.get(id)?.waitPhone || phoneChange.has(id);
 
@@ -470,27 +532,27 @@ bot.on("message:contact", async (ctx) => {
   const contact = ctx.message.contact;
   // проверка: номер должен быть от этого же аккаунта, а не пересланный чужой контакт
   if (contact.user_id !== ctx.from.id) {
-    return ctx.reply("Это чужой контакт 🙂 Нажми «📱 Отправить мой номер» или «✏️ Ввести другой номер».", { reply_markup: phoneKb });
+    return ctx.reply("Это чужой контакт 🙂 Нажмите «📱 Отправить мой номер» или «✏️ Ввести другой номер».", { reply_markup: phoneKb });
   }
   const phone = contact.phone_number.startsWith("+") ? contact.phone_number : `+${contact.phone_number}`;
   await phoneReceived(ctx, phone, true);
 });
 
 bot.hears(PHONE_MANUAL, (ctx) =>
-  ctx.reply("Напиши номер, на который тебе звонить, например: +7 900 123-45-67", { reply_markup: phoneKb }),
+  ctx.reply("Напишите номер, на который вам звонить, например: +7 900 123-45-67", { reply_markup: phoneKb }),
 );
 
 bot.hears(PHONE_CANCEL, async (ctx) => {
   const hadDraft = drafts.delete(ctx.from.id);
   phoneChange.delete(ctx.from.id);
-  await ctx.reply(hadDraft ? "Запись отменена." : "Хорошо, номер не меняю.", { reply_markup: mainMenu });
+  await ctx.reply(hadDraft ? "Запись отменена." : "Хорошо, номер не меняем.", { reply_markup: mainMenu });
 });
 
 // /nomer — поменять сохранённый номер
 bot.command("nomer", (ctx) => {
   phoneChange.add(ctx.from.id);
   const u = getUser(ctx.from.id);
-  return ctx.reply(`${u?.phone ? `Сейчас у тебя номер ${u.phone}.\n` : ""}Отправь новый номер кнопкой или напиши его 👇`, { reply_markup: phoneKb });
+  return ctx.reply(`${u?.phone ? `Сейчас у вас номер ${u.phone}.\n` : ""}Отправьте новый номер кнопкой или напишите его 👇`, { reply_markup: phoneKb });
 });
 
 bot.on("message:text", async (ctx) => {
@@ -498,32 +560,75 @@ bot.on("message:text", async (ctx) => {
   if (waitingPhone(ctx.from.id)) {
     const phone = parsePhone(ctx.message.text);
     if (phone) return phoneReceived(ctx, phone, false);
-    return ctx.reply("Не похоже на номер 🤔 Напиши так: +7 900 123-45-67 — или нажми «📱 Отправить мой номер».", { reply_markup: phoneKb });
+    return ctx.reply("Не похоже на номер 🤔 Напишите так: +7 900 123-45-67 — или нажмите «📱 Отправить мой номер».", { reply_markup: phoneKb });
   }
-  return ctx.reply("Нажми кнопку ниже 👇", { reply_markup: mainMenu });
+  return ctx.reply("Выберите кнопку внизу 👇", { reply_markup: mainMenu });
 });
 
-// ---------- напоминания ----------
-// Раз в минуту смотрим записи: если до визита осталось меньше REMIND_BEFORE_HOURS часов и ещё не напоминали — напоминаем.
-async function sendReminders() {
+// ---------- раз в минуту: напоминания, отзывы, сводка мастеру ----------
+async function send(userId, text, kb) {
+  try {
+    await bot.api.sendMessage(userId, text, kb ? { reply_markup: kb } : undefined);
+  } catch (e) {
+    console.error("Не удалось отправить сообщение:", e.message);
+  }
+}
+
+async function tick() {
   const list = loadBookings();
   const now = new Date();
   let changed = false;
+  const reviewedNow = new Set(); // кому уже отправили просьбу об отзыве в этот раз — второй не шлём
+
   for (const b of list) {
     const left = bookingDate(b) - now; // сколько миллисекунд до визита
+
+    // накануне вечером: «Придёте?» с кнопками (только до 22:00, чтобы не будить людей)
+    if (!b.dayReminded && b.day === dayAfter(1) && nowAfter(DAY_REMIND_AT) && !nowAfter("22:00")) {
+      const kb = new InlineKeyboard().text("✅ Приду", `cfm:${b.id}`).text("❌ Отменить запись", `del:${b.id}`);
+      await send(b.userId, `👋 Напоминаем: завтра, ${prettyDay(b.day)}, в ${b.time} — ${b.service}.\n📍 ${ADDRESS}\n\nПодтвердите, пожалуйста, что придёте:`, kb);
+      b.dayReminded = true;
+      changed = true;
+    }
+
+    // за REMIND_BEFORE_HOURS часа до визита
     if (!b.reminded && left > 0 && left <= REMIND_BEFORE_HOURS * 3600 * 1000) {
-      try {
-        await bot.api.sendMessage(b.userId, `⏰ Напоминаю: сегодня в ${b.time} — ${b.service}.\n📍 ${ADDRESS}\nЕсли не получается прийти — отмени запись в «Мои записи».`);
-      } catch (e) {
-        console.error("Не удалось отправить напоминание:", e.message);
-      }
+      const kb = new InlineKeyboard().url("🗺 Как добраться", MAP_LINK).row().text("❌ Не смогу прийти", `del:${b.id}`);
+      await send(b.userId, `⏰ Напоминаем: сегодня в ${b.time} — ${b.service}.\n📍 ${ADDRESS}`, kb);
       b.reminded = true;
+      changed = true;
+    }
+
+    // после визита — попросить отзыв: только по свежим визитам (за сутки), днём (10:00–21:00) и один раз на человека
+    const sinceEnd = now - endDate(b);
+    const daytime = nowAfter("10:00") && !nowAfter("21:00");
+    if (REVIEW_LINK && !b.reviewAsked && daytime && sinceEnd >= REVIEW_AFTER_HOURS * 3600 * 1000 && sinceEnd < 24 * 3600 * 1000) {
+      if (!reviewedNow.has(b.userId)) {
+        const kb = new InlineKeyboard().url("⭐ Оставить отзыв", REVIEW_LINK).row().text("✂️ Записаться снова", "book");
+        await send(b.userId, "Спасибо, что были у нас! 🙏\nКак всё прошло? Будем очень благодарны за отзыв — это займёт минуту.", kb);
+        reviewedNow.add(b.userId);
+      }
+      b.reviewAsked = true;
       changed = true;
     }
   }
   if (changed) saveBookings(list);
+
+  // утренняя сводка мастеру — один раз в день, в первые 3 часа после DIGEST_AT
+  const state = loadState();
+  const today = dayAfter(0);
+  if (ADMIN_ID && state.digestDay !== today && nowAfter(DIGEST_AT)) {
+    if (!nowAfter(toTime(toMin(DIGEST_AT) + 180))) {
+      const todays = list.filter((b) => b.day === today).sort((a, b) => toMin(a.time) - toMin(b.time));
+      const text = todays.length
+        ? `☀️ Доброе утро! Сегодня, ${prettyDay(today)}, записей: ${todays.length}\n` + todays.map((b) => `• ${adminLine(b)}`).join("\n")
+        : `☀️ Доброе утро! На сегодня, ${prettyDay(today)}, записей пока нет.`;
+      await notifyAdmin(text);
+    }
+    saveState({ ...state, digestDay: today });
+  }
 }
-setInterval(sendReminders, 60 * 1000);
+setInterval(() => tick().catch((e) => console.error("Ошибка в напоминаниях:", e.message)), 60 * 1000);
 
 // ---------- профиль бота в Telegram ----------
 // Кнопка «Меню» слева от поля ввода и текст «Что умеет этот бот?», который видно в пустом чате до нажатия «Старт»
@@ -533,7 +638,7 @@ async function setupProfile() {
       { command: "zapis", description: "✂️ Записаться" },
       { command: "moi", description: "📋 Мои записи" },
       { command: "ceny", description: "💰 Цены" },
-      { command: "kontakty", description: "📍 Контакты" },
+      { command: "kontakty", description: "📍 Контакты и как добраться" },
       { command: "nomer", description: "📞 Изменить номер телефона" },
       { command: "start", description: "🏠 Главное меню" },
     ];
@@ -546,9 +651,9 @@ async function setupProfile() {
       );
     }
     await bot.api.setMyDescription(
-      `Онлайн-запись в барбершоп «Лезвие» ✂️\n\n• Запишись за 30 секунд — без звонков и переписки\n• Видно только свободное время\n• Напомню о визите за ${REMIND_BEFORE_HOURS} часа\n• Отменить запись — в один клик\n\nНажми «Старт» 👇`,
+      `Онлайн-запись в ${SALON} ✂️\n\n• Запись за 30 секунд — без звонков и переписки\n• Видно только свободное время\n• Напомним о визите накануне и за ${REMIND_BEFORE_HOURS} часа\n• Отменить запись — в один клик\n\nНажмите «Старт» 👇`,
     );
-    await bot.api.setMyShortDescription("Онлайн-запись в барбершоп «Лезвие» — без звонков, с напоминанием о визите.");
+    await bot.api.setMyShortDescription(`Онлайн-запись в ${SALON} — без звонков, с напоминанием о визите.`);
   } catch (e) {
     console.error("Не удалось обновить профиль бота:", e.message);
   }
@@ -557,5 +662,5 @@ async function setupProfile() {
 bot.catch((err) => console.error("Ошибка:", err.message));
 setupProfile();
 bot.start();
-sendReminders();
-console.log("Бот запущен! Открой его в Telegram и напиши /start");
+tick().catch((e) => console.error("Ошибка в напоминаниях:", e.message));
+console.log("Бот запущен! Откройте его в Telegram и напишите /start");
