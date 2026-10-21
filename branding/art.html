@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<!-- Картинки для оформления: аватарка бота, аватарка канала, обложка бота.
+     Какую рисовать — задаётся в адресе: art.html?avatar | ?channel | ?cover -->
+<style>
+  @font-face { font-family: "Oswald"; font-weight: 600; src: url("../webapp/oswald-cyr.woff2") format("woff2"); unicode-range: U+0400-045F; }
+  @font-face { font-family: "Oswald"; font-weight: 600; src: url("../webapp/oswald-lat.woff2") format("woff2"); unicode-range: U+0000-00FF, U+2000-206F; }
+  html, body { margin: 0; background: #15110f; overflow: hidden; }
+  .art { position: relative; overflow: hidden; background: radial-gradient(70% 70% at 50% 35%, #2b211a 0%, #15110f 70%); color: #f4ece2; font-family: "Oswald", sans-serif; }
+  .sq { width: 640px; height: 640px; }
+  .wide { width: 640px; height: 360px; }
+  .gold { background: linear-gradient(150deg, #f0c878 0%, #dba54b 45%, #a8772a 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .ring { position: absolute; border-radius: 50%; border: 6px solid rgba(219, 165, 75, 0.9); }
+  .ring.thin { border-width: 2px; border-color: rgba(219, 165, 75, 0.35); }
+  .center { position: absolute; inset: 0; display: grid; place-items: center; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <!-- аватарка бота: большая «Л» в золотом кольце, ножницы сверху -->
+  <div class="art sq hidden" id="avatar">
+    <div class="ring thin" style="inset: 40px"></div>
+    <div class="ring" style="inset: 72px"></div>
+    <div class="center"><div class="gold" style="font-size: 330px; line-height: 1; margin-top: 18px">Л</div></div>
+    <svg style="position:absolute; left: 270px; top: 92px" width="100" height="70" viewBox="0 0 100 70" fill="none" stroke="#dba54b" stroke-width="6" stroke-linecap="round">
+      <circle cx="20" cy="50" r="13" /><circle cx="80" cy="50" r="13" /><path d="M30 40 L70 8 M70 40 L30 8" />
+    </svg>
+    <div style="position:absolute; bottom: 104px; left: 0; right: 0; text-align: center; letter-spacing: 0.32em; font-size: 30px; color: #dba54b">ЛЕЗВИЕ</div>
+  </div>
+
+  <!-- аватарка канала: календарь с галочкой — «онлайн-запись» -->
+  <div class="art sq hidden" id="channel">
+    <div class="ring thin" style="inset: 40px"></div>
+    <svg class="center" style="position:absolute; left: 170px; top: 140px" width="300" height="300" viewBox="0 0 300 300" fill="none">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f0c878" /><stop offset="0.5" stop-color="#dba54b" /><stop offset="1" stop-color="#a8772a" /></linearGradient></defs>
+      <rect x="20" y="45" width="260" height="235" rx="38" fill="url(#g)" />
+      <rect x="20" y="45" width="260" height="70" rx="38" fill="#a8772a" />
+      <rect x="20" y="85" width="260" height="30" fill="#a8772a" />
+      <rect x="78" y="15" width="22" height="70" rx="11" fill="#f4ece2" /><rect x="200" y="15" width="22" height="70" rx="11" fill="#f4ece2" />
+      <path d="M95 195 L135 235 L210 150" stroke="#15110f" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+    <div style="position:absolute; bottom: 96px; left: 0; right: 0; text-align: center; letter-spacing: 0.2em; font-size: 34px; color: #dba54b">ОНЛАЙН-ЗАПИСЬ</div>
+  </div>
+
+  <!-- обложка бота (видно в пустом чате до «Старт») -->
+  <div class="art wide hidden" id="cover">
+    <div class="ring thin" style="width: 520px; height: 520px; right: -150px; top: -80px"></div>
+    <div class="ring" style="width: 360px; height: 360px; right: -70px; top: 0"></div>
+    <div class="gold" style="position:absolute; right: 34px; top: 40px; font-size: 250px; line-height: 1">Л</div>
+    <div style="position:absolute; left: 40px; top: 52px; letter-spacing: 0.3em; font-size: 22px; color: #dba54b">БАРБЕРШОП «ЛЕЗВИЕ»</div>
+    <div style="position:absolute; left: 38px; top: 96px; font-size: 76px; line-height: 1.02">Онлайн-<br />запись</div>
+    <div style="position:absolute; left: 40px; top: 262px; width: 330px; font: 400 20px/1.35 -apple-system, 'Segoe UI', sans-serif; color: #b8aa9a">Выбирайте время онлайн — бот напомнит о визите</div>
+  </div>
+<script>
+  const which = location.search.slice(1) || "avatar";
+  document.getElementById(which).classList.remove("hidden");
+</script>
+</body>
+</html>

@@ -160,6 +160,13 @@
   @keyframes sh { from { background-position: 200% 0; } to { background-position: -200% 0; } }
   .hidden { display: none !important; }
 
+  /* наши работы */
+  .gallery { display: flex; gap: 8px; overflow-x: auto; margin: 0 -16px 22px; padding: 0 16px; scrollbar-width: none; }
+  .gallery::-webkit-scrollbar { display: none; }
+  .gallery img { flex: 0 0 auto; width: 118px; height: 150px; object-fit: cover; border-radius: 16px; cursor: zoom-in; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); }
+  .viewer { position: fixed; inset: 0; background: rgba(10, 8, 7, 0.94); display: grid; place-items: center; z-index: 20; padding: 18px; }
+  .viewer img { max-width: 100%; max-height: 86vh; border-radius: 16px; }
+
   /* кабинет мастера */
   .tabs.three { grid-template-columns: 1fr 1fr 1fr; }
   .tab { font-size: 14px; padding: 10px 4px; }
@@ -206,6 +213,10 @@
 
   <!-- ВКЛАДКА: запись -->
   <main id="book">
+    <section class="step hidden" id="galleryStep">
+      <div class="step-head"><span class="step-num">ФОТО</span><h2>Наши работы</h2></div>
+      <div class="gallery" id="gallery"></div>
+    </section>
     <section class="step">
       <div class="step-head"><span class="step-num">ШАГ 1</span><h2>Услуга</h2></div>
       <div class="services" id="services"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
@@ -283,6 +294,7 @@
 
 <div class="cta-bar" id="ctaBar"><button class="cta" id="cta" disabled>Выберите услугу</button></div>
 <div class="toast" id="toast"></div>
+<div class="viewer hidden" id="viewer"><img id="viewerImg" alt="" /></div>
 
 <script>
   // ---------- Telegram ----------
@@ -573,6 +585,17 @@
     // внутри Telegram ссылку открываем через Telegram — так она точно откроется в браузере
     $("mapLink").onclick = (e) => { if (tg && tg.openLink) { e.preventDefault(); tg.openLink(S.config.mapLink); } };
     $("policyLink").onclick = (e) => { if (tg && tg.openLink) { e.preventDefault(); tg.openLink(new URL("policy.html", location.href).href); } };
+    // наши работы: лента фото, по нажатию — на весь экран
+    if (S.config.gallery && S.config.gallery.length) {
+      show("galleryStep");
+      for (const src of S.config.gallery) {
+        const img = document.createElement("img");
+        img.src = src; img.loading = "lazy"; img.alt = "Работа мастера";
+        img.onclick = () => { haptic(); $("viewerImg").src = src; show("viewer"); };
+        $("gallery").appendChild(img);
+      }
+    }
+    $("viewer").onclick = () => show("viewer", false);
     renderServices();
     await loadMe();
     updateCta();

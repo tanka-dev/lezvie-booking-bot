@@ -3,6 +3,7 @@
 // .env:  BOT_TOKEN=...   ADMIN_ID=...  (ADMIN_ID — Telegram id мастера, узнать командой /myid)
 
 const fs = require("fs");
+const path = require("path");
 const { Bot, InlineKeyboard, Keyboard } = require("grammy");
 
 const bot = new Bot(process.env.BOT_TOKEN);
@@ -724,7 +725,6 @@ async function setupProfile() {
 // Снаружи всё это закрыто HTTPS-сервером Caddy: https://…sslip.io → localhost:WEB_PORT
 const http = require("http");
 const crypto = require("crypto");
-const path = require("path");
 
 // Telegram подписывает данные пользователя токеном бота — проверяем подпись, подделать её нельзя.
 // Возвращает пользователя { id, first_name, username } или null
@@ -757,6 +757,10 @@ const API = {
   "GET /api/config": () => ({
     salon: SALON, city: CITY, address: ADDRESS, phone: SALON_PHONE, mapLink: MAP_LINK, schedule: scheduleText().split("\n🕙 "),
     services: SERVICES.map((s) => ({ id: s.id, name: s.name, price: s.price, minutes: s.minutes, dur: durText(s.minutes) })),
+    // фото работ: все jpg/png из папки webapp/gallery (у заказчика — его фото)
+    gallery: fs.existsSync(path.join(__dirname, "webapp", "gallery"))
+      ? fs.readdirSync(path.join(__dirname, "webapp", "gallery")).filter((f) => /\.(jpe?g|png|webp)$/i.test(f)).sort().map((f) => "gallery/" + f)
+      : [],
   }),
   // дни на DAYS_AHEAD вперёд с количеством свободного времени под услугу
   "GET /api/days": (q) => {
@@ -917,7 +921,7 @@ Object.assign(API, {
   },
 });
 
-const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
 const WEB_DIR = path.join(__dirname, "webapp");
 
 const server = http.createServer(async (req, res) => {
