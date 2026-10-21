@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Политика обработки персональных данных</title>
+<style>
+  :root { --bg: #15110f; --card: #211b17; --fg: #f4ece2; --muted: #b8aa9a; --accent: #dba54b; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { font: 15px/1.55 -apple-system, "Segoe UI", Roboto, system-ui, sans-serif; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 22px 18px 40px; }
+  h1 { font-size: 22px; line-height: 1.25; margin: 0 0 6px; }
+  h2 { font-size: 16px; color: var(--accent); margin: 22px 0 6px; }
+  p, li { color: var(--fg); margin: 0 0 8px; }
+  ul { padding-left: 20px; margin: 0 0 8px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .card { background: var(--card); border-radius: 14px; padding: 12px 14px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Политика обработки персональных данных</h1>
+  <p class="muted">Онлайн-запись в Telegram · <span class="salon">салон</span></p>
+
+  <h2>1. Кто обрабатывает данные</h2>
+  <p>Оператор персональных данных — <span class="salon">салон</span> (<span class="addr">адрес</span>, телефон <span class="phone">—</span>). Данные обрабатываются в соответствии с Федеральным законом № 152-ФЗ «О персональных данных».</p>
+
+  <h2>2. Какие данные мы получаем</h2>
+  <ul>
+    <li>имя и имя пользователя в Telegram, идентификатор Telegram;</li>
+    <li>номер телефона, который вы отправили или ввели;</li>
+    <li>данные о записи: услуга, дата и время визита.</li>
+  </ul>
+
+  <h2>3. Зачем</h2>
+  <ul>
+    <li>чтобы записать вас на услугу и показать ваши записи;</li>
+    <li>чтобы напомнить о визите и, если нужно, связаться с вами по поводу записи;</li>
+    <li>чтобы после визита предложить оставить отзыв.</li>
+  </ul>
+  <p>Мы не используем ваши данные для рекламных рассылок и не передаём их третьим лицам, кроме случаев, предусмотренных законом.</p>
+
+  <h2>4. Сколько храним</h2>
+  <p>Данные о записях и номер телефона хранятся, пока вы пользуетесь записью, и не дольше 1 года после последнего визита, после чего удаляются. Резервные копии хранятся не дольше 30 дней.</p>
+
+  <h2>5. Ваши права</h2>
+  <p>Вы можете в любой момент узнать, какие ваши данные хранятся, изменить номер (команда /nomer в боте) или отозвать согласие и попросить удалить данные — напишите в этот же бот или позвоните по телефону <span class="phone">—</span>.</p>
+
+  <h2>6. Согласие</h2>
+  <div class="card">Нажимая «Записаться» или отправляя номер телефона в боте, вы даёте согласие на обработку указанных персональных данных на условиях этой политики.</div>
+</div>
+<script>
+  // название, адрес и телефон берём из настроек бота
+  fetch("/api/config").then((r) => r.json()).then((c) => {
+    const salon = c.salon.replace(/^./, (x) => x.toUpperCase());
+    document.querySelectorAll(".salon").forEach((e) => (e.textContent = salon));
+    document.querySelectorAll(".addr").forEach((e) => (e.textContent = `${c.city}, ${c.address}`));
+    document.querySelectorAll(".phone").forEach((e) => (e.textContent = c.phone));
+  }).catch(() => {});
+</script>
+</body>
+</html>

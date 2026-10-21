@@ -66,7 +66,7 @@ const getUser = (userId) => readJson(USERS_FILE, {})[userId]; // { phone, verifi
 // verified = true — номер пришёл кнопкой из Telegram (точно настоящий), false — клиент написал сам
 function savePhone(userId, phone, verified) {
   const users = readJson(USERS_FILE, {});
-  users[userId] = { phone, verified };
+  users[userId] = { phone, verified, savedAt: Date.now() };
   writeJson(USERS_FILE, users);
 }
 // номер, набранный руками → "+79001234567" или null, если на номер не похоже
@@ -217,6 +217,7 @@ bot.command("myid", (ctx) => ctx.reply(`Ваш id: ${ctx.from.id}`));
 // ---------- панель мастера: /master ----------
 const MASTER_DAYS = 14; // на сколько дней вперёд мастер видит график
 const masterKb = new InlineKeyboard().text("📋 Записи", "adm:list").row().text("🗓 График и выходные", "adm:days");
+if (WEBAPP_URL) masterKb.row().webApp("💈 Открыть кабинет мастера", WEBAPP_URL + "?tab=master");
 bot.command("master", (ctx) => {
   if (!isAdmin(ctx)) return ctx.reply("Эта команда только для мастера.");
   return ctx.reply("🛠 Панель мастера", { reply_markup: masterKb });
@@ -298,14 +299,12 @@ bot.callbackQuery(/^adel:(.+)$/, async (ctx) => {
   const kb = new InlineKeyboard().text("✅ Да, отменить", `adelok:${b.id}`).text("⬅️ Нет", "adm:list");
   await edit(ctx, `Отменить запись?\n👤 ${b.name}${b.phone ? `, ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${timeRange(b)}\n\nКлиенту придёт сообщение об отмене.`, kb);
 });
-bot.callbackQuery(/^adelok:(.+)$/, async (ctx) => {
+// мастер отменяет запись (из чата или из окна): удаляем и пишем клиенту; возвращает запись или null
+async function cancelByMaster(id) {
   const list = loadBookings();
-  const b = list.find((x) => x.id === ctx.match[1]);
-  if (!b) { await ctx.answerCallbackQuery(); const v = listView(); return edit(ctx, v.text, v.kb); }
+  const b = list.find((x) => x.id === id);
+  if (!b) return null;
   saveBookings(list.filter((x) => x !== b));
-  await ctx.answerCallbackQuery({ text: "Запись отменена, клиент уведомлён" });
-  const v = listView();
-  await edit(ctx, `✅ Отменил: ${prettyDay(b.day)}, ${b.time} — ${b.name}\n\n` + v.text, v.kb);
   try {
     await bot.api.sendMessage(
       b.userId,
@@ -315,6 +314,14 @@ bot.callbackQuery(/^adelok:(.+)$/, async (ctx) => {
   } catch (e) {
     await notifyAdmin(`⚠️ Не удалось написать клиенту ${b.name} (возможно, он заблокировал бота). Позвони: ${b.phone || "номера нет"}`);
   }
+  return b;
+}
+bot.callbackQuery(/^adelok:(.+)$/, async (ctx) => {
+  const b = await cancelByMaster(ctx.match[1]);
+  if (!b) { await ctx.answerCallbackQuery(); const v = listView(); return edit(ctx, v.text, v.kb); }
+  await ctx.answerCallbackQuery({ text: "Запись отменена, клиент уведомлён" });
+  const v = listView();
+  await edit(ctx, `✅ Отменил: ${prettyDay(b.day)}, ${b.time} — ${b.name}\n\n` + v.text, v.kb);
 });
 
 // закрыть/открыть отдельное время
@@ -499,8 +506,9 @@ bot.callbackQuery("confirm", async (ctx) => {
   // номера ещё нет — просим один раз, запись завершится, когда он придёт
   draft.waitPhone = true;
   await ctx.reply(
-    "Остался один шаг 👇\nНажмите «📱 Отправить мой номер» — мастер сможет позвонить, если что-то изменится.\nЕсли звонить лучше на другой номер — нажмите «✏️ Ввести другой номер». Спросим только один раз.",
-    { reply_markup: phoneKb },
+    "Остался один шаг 👇\nНажмите «📱 Отправить мой номер» — мастер сможет позвонить, если что-то изменится.\nЕсли звонить лучше на другой номер — нажмите «✏️ Ввести другой номер». Спросим только один раз." +
+      (WEBAPP_URL ? `\n\nОтправляя номер, вы соглашаетесь на обработку персональных данных: ${WEBAPP_URL}policy.html` : ""),
+    { reply_markup: phoneKb, link_preview_options: { is_disabled: true } },
   );
 });
 
@@ -524,6 +532,7 @@ async function createBooking(from, draft) {
   const booking = {
     id: Math.random().toString(36).slice(2, 9),
     service: draft.service, minutes: draft.minutes, day: draft.day, time: draft.time,
+    price: SERVICES.find((x) => x.name === draft.service)?.price ?? 0,
     name, phone: user.phone, userId: from.id,
     dayReminded: tooLateForDayRemind, reminded: false, reviewAsked: false, confirmed: false,
     createdAt: new Date().toISOString(),
@@ -643,6 +652,22 @@ async function tick() {
     }
   }
   if (changed) saveBookings(list);
+
+  // раз в день удаляем данные старше года (так обещано в политике обработки данных)
+  const st0 = loadState();
+  if (st0.cleanDay !== dayAfter(0)) {
+    const yearAgo = Date.now() - 365 * 24 * 3600 * 1000;
+    const keep = loadBookings().filter((b) => bookingDate(b).getTime() > yearAgo);
+    saveBookings(keep);
+    const users = readJson(USERS_FILE, {});
+    const active = new Set(keep.map((b) => String(b.userId)));
+    for (const id of Object.keys(users)) if (!active.has(id) && (users[id].savedAt || 0) < yearAgo) delete users[id];
+    writeJson(USERS_FILE, users);
+    const c = loadClosed();
+    const today = dayAfter(0);
+    saveClosed({ days: c.days.filter((d) => d >= today), slots: c.slots.filter((x) => x.slice(0, 10) >= today) }); // прошедшие выходные больше не нужны
+    saveState({ ...st0, cleanDay: dayAfter(0) });
+  }
 
   // утренняя сводка мастеру — один раз в день, в первые 3 часа после DIGEST_AT
   const state = loadState();
@@ -767,6 +792,127 @@ const API = {
     return b ? { ok: true, bookings: myBookingsView(user.id) } : { error: "gone" };
   },
 };
+
+// ---------- кабинет мастера в окне ----------
+// Мастер (ADMIN_ID) видит и меняет настоящие записи. Любой другой видит ДЕМО: примерные записи,
+// которые живут только в памяти и только для него — так будущий заказчик может «потрогать» кабинет.
+const priceOf = (b) => b.price ?? SERVICES.find((s) => s.name === b.service)?.price ?? 0;
+
+// простой генератор случайных чисел с «зерном» — у каждого гостя свои, но постоянные примерные записи
+function seeded(seed) {
+  return () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+const DEMO_NAMES = ["Анна", "Ольга", "Мария", "Дмитрий", "Ирина", "Сергей", "Екатерина", "Алексей", "Наталья", "Иван", "Юлия", "Максим"];
+const demoStores = new Map(); // id гостя → { bookings, closed }
+function demoStore(userId) {
+  if (demoStores.has(userId)) return demoStores.get(userId);
+  const rnd = seeded(Number(userId) || 1);
+  const bookings = [];
+  for (const d of nextDays(7)) {
+    const slots = daySlots(d.iso);
+    if (!slots.length) continue;
+    let m = toMin(slots[0]) + 30 * Math.floor(rnd() * 3);
+    const end = toMin(slots[slots.length - 1]) + STEP_MINUTES;
+    while (m < end) {
+      const s = SERVICES[Math.floor(rnd() * SERVICES.length)];
+      if (m + s.minutes > end) break;
+      if (rnd() < 0.55) {
+        bookings.push({
+          id: "demo" + bookings.length, service: s.name, minutes: s.minutes, price: s.price, day: d.iso, time: toTime(m),
+          name: DEMO_NAMES[Math.floor(rnd() * DEMO_NAMES.length)], phone: `+7 900 000-${String(10 + Math.floor(rnd() * 89))}-${String(10 + Math.floor(rnd() * 89))}`,
+          confirmed: rnd() < 0.5,
+        });
+        m += s.minutes;
+      } else m += 30 * (1 + Math.floor(rnd() * 3));
+    }
+  }
+  const store = { bookings, closed: { days: [], slots: [] } };
+  demoStores.set(userId, store);
+  return store;
+}
+
+// откуда брать данные: настоящие файлы или демо-хранилище гостя
+function masterSource(user) {
+  if (user.id === ADMIN_ID) {
+    return {
+      demo: false,
+      bookings: () => loadBookings(),
+      closed: () => loadClosed(),
+      saveClosed: (c) => saveClosed(c),
+      cancel: (id) => cancelByMaster(id),
+    };
+  }
+  const st = demoStore(user.id);
+  return {
+    demo: true,
+    bookings: () => st.bookings,
+    closed: () => st.closed,
+    saveClosed: (c) => { st.closed = c; },
+    cancel: async (id) => { const b = st.bookings.find((x) => x.id === id); st.bookings = st.bookings.filter((x) => x !== b); return b || null; },
+  };
+}
+
+// всё, что показывает кабинет: дни, выбранный день с «клеточками» времени и записями, итоги на сегодня
+function masterView(src, iso) {
+  const all = src.bookings();
+  const closed = src.closed();
+  const onDay = (d) => all.filter((b) => b.day === d).sort((a, b) => toMin(a.time) - toMin(b.time));
+  const sum = (list) => list.reduce((s, b) => s + priceOf(b), 0);
+  const days = nextDays(MASTER_DAYS).map((d) => {
+    const c = dayCard(d.iso, 0);
+    const list = onDay(d.iso);
+    return { iso: d.iso, weekday: c.weekday, day: c.day, month: c.month, label: c.label, count: list.length, off: !workHours(d.iso), closed: closed.days.includes(d.iso) };
+  });
+  const day = iso && days.some((d) => d.iso === iso) ? iso : days[0].iso;
+  const list = onDay(day);
+  const covering = (t) => list.find((b) => toMin(b.time) <= toMin(t) && toMin(t) < toMin(b.time) + durOf(b));
+  const today = onDay(dayAfter(0));
+  return {
+    demo: src.demo,
+    today: { count: today.length, revenue: sum(today) },
+    tomorrow: { count: onDay(dayAfter(1)).length },
+    days,
+    day: {
+      iso: day,
+      pretty: prettyDay(day),
+      off: !workHours(day),
+      closed: closed.days.includes(day),
+      revenue: sum(list),
+      slots: daySlots(day).map((t) => ({ time: t, state: covering(t) ? "booked" : closed.days.includes(day) || closed.slots.includes(`${day} ${t}`) ? "closed" : "free" })),
+      bookings: list.map((b) => ({ id: b.id, range: timeRange(b), service: b.service, name: b.name, phone: b.phone || "", price: priceOf(b), confirmed: !!b.confirmed })),
+    },
+  };
+}
+
+Object.assign(API, {
+  "POST /api/master/state": (_, body, user) => masterView(masterSource(user), body.day),
+  // закрыть/открыть время
+  "POST /api/master/slot": (_, body, user) => {
+    const src = masterSource(user);
+    const day = String(body.day), t = String(body.time);
+    const c = src.closed();
+    if (src.bookings().some((b) => b.day === day && toMin(b.time) <= toMin(t) && toMin(t) < toMin(b.time) + durOf(b))) return { error: "booked" };
+    if (c.days.includes(day)) return { error: "dayoff" };
+    const key = `${day} ${t}`;
+    src.saveClosed({ ...c, slots: c.slots.includes(key) ? c.slots.filter((s) => s !== key) : [...c.slots, key] });
+    return masterView(src, day);
+  },
+  // весь день — выходной / рабочий
+  "POST /api/master/day": (_, body, user) => {
+    const src = masterSource(user);
+    const day = String(body.day);
+    const c = src.closed();
+    src.saveClosed({ ...c, days: c.days.includes(day) ? c.days.filter((d) => d !== day) : [...c.days, day] });
+    return masterView(src, day);
+  },
+  // отменить запись клиента (клиенту придёт сообщение; в демо — только на экране)
+  "POST /api/master/cancel": async (_, body, user) => {
+    const src = masterSource(user);
+    const b = await src.cancel(String(body.id));
+    if (!b) return { error: "gone" };
+    return masterView(src, b.day);
+  },
+});
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
 const WEB_DIR = path.join(__dirname, "webapp");

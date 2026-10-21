@@ -159,6 +159,36 @@
   .skeleton { height: 76px; border-radius: var(--radius); background: linear-gradient(90deg, var(--card), var(--card-2), var(--card)); background-size: 200% 100%; animation: sh 1.2s linear infinite; margin-bottom: 10px; }
   @keyframes sh { from { background-position: 200% 0; } to { background-position: -200% 0; } }
   .hidden { display: none !important; }
+
+  /* кабинет мастера */
+  .tabs.three { grid-template-columns: 1fr 1fr 1fr; }
+  .tab { font-size: 14px; padding: 10px 4px; }
+  .demo-note { background: rgba(219, 165, 75, 0.12); box-shadow: inset 0 0 0 1px var(--line); color: var(--fg); padding: 12px 14px; border-radius: 14px; font-size: 14px; margin-bottom: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+  .stat { background: var(--card); border-radius: 16px; padding: 12px 10px; text-align: center; }
+  .stat .num { font-size: 24px; color: var(--accent); line-height: 1.1; }
+  .stat .lbl { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .day .cnt { font-size: 10px; margin-top: 3px; min-height: 13px; color: var(--accent); }
+  .day.off { opacity: 0.45; }
+  .mhead { display: flex; justify-content: space-between; align-items: baseline; margin: 16px 2px 10px; }
+  .mhead h2 { margin: 0; font-size: 20px; }
+  .mhead span { color: var(--accent); font: 600 16px "Oswald", sans-serif; }
+  .mb { background: var(--card); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 10px; border: 1px solid var(--line); }
+  .mb .top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .mb .t { font: 600 20px "Oswald", sans-serif; }
+  .mb .p { color: var(--accent); font-weight: 600; }
+  .mb .s { color: var(--muted); margin: 2px 0 8px; }
+  .mb .who { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .mb .who a { color: var(--fg); text-decoration: none; font-weight: 600; }
+  .mb .ok { font-size: 13px; color: #8fd18f; }
+  .mb .wait { font-size: 13px; color: var(--muted); }
+  .mb .btn-danger { margin-top: 10px; }
+  .hint { color: var(--muted); font-size: 13px; margin: -4px 2px 10px; }
+  .slot { padding: 11px 0; border-radius: 12px; border: 0; background: var(--card); color: var(--fg); font: 600 15px inherit; font-family: inherit; cursor: pointer; font-variant-numeric: tabular-nums; }
+  .slot.booked { background: rgba(219, 165, 75, 0.16); color: var(--accent); }
+  .slot.closed { background: repeating-linear-gradient(135deg, var(--card) 0 6px, #1b1613 6px 12px); color: var(--danger); text-decoration: line-through; }
+  .legal { color: var(--muted); font-size: 12px; margin: 12px 0 0; line-height: 1.35; }
+  .legal a { color: var(--accent); text-decoration: none; }
 </style>
 </head>
 <body>
@@ -168,9 +198,10 @@
     <div><h1 id="salon">Онлайн-запись</h1><p id="addr">&nbsp;</p></div>
   </header>
 
-  <nav class="tabs">
+  <nav class="tabs three">
     <button class="tab on" data-tab="book">Записаться</button>
     <button class="tab" data-tab="mine">Мои записи<span class="badge hidden" id="mineCount"></span></button>
+    <button class="tab" data-tab="master">💈 Мастер</button>
   </nav>
 
   <!-- ВКЛАДКА: запись -->
@@ -203,6 +234,7 @@
           </div>
         </div>
         <div class="ok-line hidden" id="phoneOk"></div>
+        <p class="legal">Нажимая «Записаться», вы соглашаетесь на <a href="policy.html" id="policyLink">обработку персональных данных</a></p>
       </div>
     </section>
   </main>
@@ -211,6 +243,24 @@
   <main id="mine" class="hidden">
     <div id="mineList"></div>
     <div class="info-card" id="contacts"></div>
+  </main>
+
+  <!-- ВКЛАДКА: кабинет мастера -->
+  <main id="master" class="hidden">
+    <div class="demo-note hidden" id="demoNote">👀 <b>Демо-кабинет.</b> Так мастер видит свои записи. Данные примерные — нажимайте что угодно, настоящие записи это не затронет.</div>
+    <div class="stats">
+      <div class="stat"><div class="num" id="mToday">0</div><div class="lbl">записей сегодня</div></div>
+      <div class="stat"><div class="num" id="mRevenue">0 ₽</div><div class="lbl">выручка сегодня</div></div>
+      <div class="stat"><div class="num" id="mTomorrow">0</div><div class="lbl">записей завтра</div></div>
+    </div>
+    <div class="days" id="mDays"></div>
+    <div class="mhead"><h2 id="mDayTitle"></h2><span id="mDayRevenue"></span></div>
+    <div id="mList"></div>
+    <div class="mhead"><h2>График дня</h2></div>
+    <p class="hint">Нажмите на время, чтобы закрыть или открыть его. Золотые — уже заняты клиентами.</p>
+    <div class="times" id="mSlots"></div>
+    <div class="gap"></div>
+    <button class="btn btn-ghost" id="mDayToggle"></button>
   </main>
 
   <!-- ЭКРАН: успех -->
@@ -378,7 +428,7 @@
     $("dService").textContent = r.booking.service;
     $("dWhen").textContent = `${r.booking.pretty}, ${r.booking.range}`;
     $("dAddr").textContent = r.booking.address;
-    show("book", false); show("mine", false); show("success"); show("ctaBar", false);
+    show("book", false); show("mine", false); show("master", false); show("success"); show("ctaBar", false);
     window.scrollTo({ top: 0 });
     // форма записи — с чистого листа для следующего раза
     S.service = null; S.day = null; S.time = null;
@@ -420,12 +470,94 @@
     renderMine();
   }
 
+  // ---------- кабинет мастера ----------
+  const M = { day: null, data: null };
+  async function loadMaster(day) {
+    if (!initData) { $("mList").innerHTML = '<div class="empty">Откройте окно из Telegram, чтобы увидеть кабинет</div>'; return; }
+    const r = await api("POST", "/api/master/state", { day });
+    if (r.error) { toast("Не получилось загрузить кабинет"); return; }
+    M.data = r; M.day = r.day.iso; renderMaster();
+  }
+  function renderMaster() {
+    const d = M.data;
+    show("demoNote", d.demo);
+    $("mToday").textContent = d.today.count;
+    $("mRevenue").textContent = d.today.revenue.toLocaleString("ru-RU") + " ₽";
+    $("mTomorrow").textContent = d.tomorrow.count;
+    // лента дней
+    $("mDays").innerHTML = "";
+    for (const x of d.days) {
+      const b = document.createElement("button");
+      b.className = "day" + (x.iso === d.day.iso ? " on" : "") + (x.off || x.closed ? " off" : "");
+      b.innerHTML = `<div class="wd">${x.label || x.weekday}</div><div class="num">${x.day}</div><div class="mo">${x.month}</div><div class="cnt">${x.off ? "выходной" : x.closed ? "закрыт" : x.count ? x.count + " зап." : ""}</div>`;
+      b.onclick = () => { haptic(); loadMaster(x.iso); };
+      $("mDays").appendChild(b);
+    }
+    // записи выбранного дня
+    $("mDayTitle").textContent = d.day.pretty.replace(/^./, (c) => c.toUpperCase());
+    $("mDayRevenue").textContent = d.day.bookings.length ? d.day.revenue.toLocaleString("ru-RU") + " ₽" : "";
+    const list = $("mList");
+    list.innerHTML = "";
+    if (d.day.off) list.innerHTML = '<div class="empty">Выходной по графику</div>';
+    else if (!d.day.bookings.length) list.innerHTML = '<div class="empty">На этот день записей нет</div>';
+    for (const b of d.day.bookings) {
+      const el = document.createElement("div");
+      el.className = "mb";
+      el.innerHTML = `<div class="top"><span class="t"></span><span class="p"></span></div><div class="s"></div><div class="who"><span class="name"></span><a class="tel"></a></div><div></div><button class="btn btn-danger">Отменить запись</button>`;
+      el.querySelector(".t").textContent = b.range;
+      el.querySelector(".p").textContent = b.price.toLocaleString("ru-RU") + " ₽";
+      el.querySelector(".s").textContent = b.service;
+      el.querySelector(".name").textContent = "👤 " + b.name;
+      const tel = el.querySelector(".tel");
+      tel.textContent = b.phone ? "📞 " + b.phone : "";
+      tel.href = "tel:" + b.phone.replace(/[^+\d]/g, "");
+      el.children[3].className = b.confirmed ? "ok" : "wait";
+      el.children[3].textContent = b.confirmed ? "✓ Клиент подтвердил визит" : "Ждём подтверждения накануне";
+      el.querySelector("button").onclick = () => {
+        const go = async () => {
+          const r = await api("POST", "/api/master/cancel", { id: b.id });
+          if (r.error) { toast("Запись уже отменена"); return loadMaster(M.day); }
+          M.data = r; haptic("ok"); toast(d.demo ? "Отменено (демо)" : "Запись отменена, клиенту отправлено сообщение"); renderMaster();
+        };
+        const q = `Отменить запись ${b.name} на ${b.range}? Клиенту придёт сообщение.`;
+        if (tg && tg.showConfirm) tg.showConfirm(q, (ok) => ok && go()); else if (confirm(q)) go();
+      };
+      list.appendChild(el);
+    }
+    // график дня
+    const slots = $("mSlots");
+    slots.innerHTML = "";
+    for (const s of d.day.slots) {
+      const b = document.createElement("button");
+      b.className = "slot " + s.state;
+      b.textContent = s.time;
+      b.onclick = async () => {
+        if (s.state === "booked") { toast("Здесь запись клиента — отмените её выше"); return; }
+        if (d.day.closed) { toast("Весь день закрыт — сначала сделайте его рабочим"); return; }
+        const r = await api("POST", "/api/master/slot", { day: d.day.iso, time: s.time });
+        if (r.error) { toast("Не получилось, обновите кабинет"); return; }
+        haptic(); M.data = r; renderMaster();
+      };
+      slots.appendChild(b);
+    }
+    const tgl = $("mDayToggle");
+    show("mDayToggle", !d.day.off);
+    tgl.textContent = d.day.closed ? "✅ Сделать день рабочим" : "🚫 Сделать день выходным";
+    tgl.onclick = async () => {
+      const r = await api("POST", "/api/master/day", { day: d.day.iso });
+      if (r.error) return;
+      haptic("ok"); M.data = r; renderMaster();
+      toast(r.day.closed ? (r.day.bookings.length ? "День закрыт для новых записей. Уже записанных отмените вручную" : "День стал выходным") : "День снова рабочий");
+    };
+  }
+
   // ---------- вкладки и кнопки ----------
   function openTab(name) {
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.tab === name));
-    show("book", name === "book"); show("mine", name === "mine"); show("success", false);
+    show("book", name === "book"); show("mine", name === "mine"); show("master", name === "master"); show("success", false);
     updateCta();
     if (name === "mine") loadMe();
+    if (name === "master") loadMaster(M.day);
   }
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { haptic(); openTab(t.dataset.tab); }));
   $("toMine").onclick = () => openTab("mine");
@@ -440,9 +572,12 @@
     $("contacts").innerHTML = `📍 ${S.config.city}, ${S.config.address}<br>🕙 ${S.config.schedule.join("<br>🕙 ")}<br>📞 ${S.config.phone}<br><br><a href="${S.config.mapLink}" target="_blank" id="mapLink">🗺 Открыть на карте</a>`;
     // внутри Telegram ссылку открываем через Telegram — так она точно откроется в браузере
     $("mapLink").onclick = (e) => { if (tg && tg.openLink) { e.preventDefault(); tg.openLink(S.config.mapLink); } };
+    $("policyLink").onclick = (e) => { if (tg && tg.openLink) { e.preventDefault(); tg.openLink(new URL("policy.html", location.href).href); } };
     renderServices();
     await loadMe();
     updateCta();
+    // открыли по кнопке «Кабинет мастера» — сразу показываем кабинет
+    if (new URLSearchParams(location.search).get("tab") === "master") openTab("master");
   })();
 </script>
 </body>
