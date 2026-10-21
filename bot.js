@@ -661,7 +661,10 @@ async function tick() {
     saveBookings(keep);
     const users = readJson(USERS_FILE, {});
     const active = new Set(keep.map((b) => String(b.userId)));
-    for (const id of Object.keys(users)) if (!active.has(id) && (users[id].savedAt || 0) < yearAgo) delete users[id];
+    for (const id of Object.keys(users)) {
+      if (!users[id].savedAt) users[id].savedAt = Date.now(); // номер сохранён до появления даты — считаем свежим
+      if (!active.has(id) && users[id].savedAt < yearAgo) delete users[id];
+    }
     writeJson(USERS_FILE, users);
     const c = loadClosed();
     const today = dayAfter(0);
