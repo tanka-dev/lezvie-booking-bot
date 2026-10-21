@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Онлайн-запись</title>
+<script src="telegram-web-app.js"></script>
+<style>
+  /* фирменный шрифт заголовков — лежит рядом, не зависит от внешних сайтов */
+  @font-face { font-family: "Oswald"; font-weight: 600; font-display: swap; src: url("oswald-cyr.woff2") format("woff2"); unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  @font-face { font-family: "Oswald"; font-weight: 600; font-display: swap; src: url("oswald-lat.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+2000-206F, U+20AC, U+2122; }
+
+  :root {
+    --bg: #15110f;
+    --card: #211b17;
+    --card-2: #2a221d;
+    --line: rgba(219, 165, 75, 0.22);
+    --fg: #f4ece2;
+    --muted: #b8aa9a;
+    --accent: #dba54b;
+    --accent-ink: #1a120a;
+    --danger: #e0705a;
+    --radius: 18px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font: 16px/1.4 -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+    min-height: 100vh;
+    padding-bottom: 110px;
+    background:
+      radial-gradient(120% 60% at 50% -10%, rgba(219, 165, 75, 0.16), transparent 60%),
+      var(--bg);
+  }
+  .wrap { max-width: 520px; margin: 0 auto; padding: 18px 16px 0; }
+  h1, h2, .num { font-family: "Oswald", "Arial Narrow", sans-serif; font-weight: 600; letter-spacing: 0.01em; }
+
+  /* шапка салона */
+  .hero { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+  .logo {
+    width: 54px; height: 54px; border-radius: 50%; flex: 0 0 auto;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, #e8bc68, #b8862f);
+    color: var(--accent-ink); font: 600 26px "Oswald", sans-serif;
+    box-shadow: 0 6px 20px rgba(219, 165, 75, 0.35);
+  }
+  .hero h1 { margin: 0; font-size: 24px; line-height: 1.1; }
+  .hero p { margin: 3px 0 0; color: var(--muted); font-size: 14px; }
+
+  /* вкладки */
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--card); border-radius: 14px; padding: 4px; margin-bottom: 20px; }
+  .tab { border: 0; background: none; color: var(--muted); font: 600 15px inherit; font-family: inherit; padding: 10px; border-radius: 11px; cursor: pointer; }
+  .tab.on { background: var(--card-2); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line); }
+  .badge { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 6px; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-size: 12px; line-height: 20px; }
+
+  /* шаги */
+  .step { margin-bottom: 22px; animation: rise 0.35s ease both; }
+  .step-head { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px; }
+  .step-num { color: var(--accent); font: 600 14px "Oswald", sans-serif; letter-spacing: 0.08em; }
+  .step-head h2 { margin: 0; font-size: 20px; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  /* услуги */
+  .services { display: grid; gap: 10px; }
+  .service {
+    display: flex; align-items: center; gap: 14px; width: 100%; text-align: left;
+    padding: 16px; border-radius: var(--radius); border: 1.5px solid transparent;
+    background: var(--card); color: var(--fg); font: inherit; cursor: pointer;
+    transition: border-color 0.15s, transform 0.1s, background 0.15s;
+  }
+  .service:active { transform: scale(0.985); }
+  .service.on { border-color: var(--accent); background: var(--card-2); }
+  .service .ico { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; background: rgba(219, 165, 75, 0.12); font-size: 22px; flex: 0 0 auto; }
+  .service .info { flex: 1; min-width: 0; }
+  .service .name { font-weight: 600; font-size: 16px; }
+  .service .dur { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .service .price { font: 600 20px "Oswald", sans-serif; color: var(--accent); white-space: nowrap; }
+
+  /* дни — лента с прокруткой */
+  .days { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 6px; margin: 0 -16px; padding-left: 16px; padding-right: 16px; scrollbar-width: none; }
+  .days::-webkit-scrollbar { display: none; }
+  .day {
+    flex: 0 0 auto; width: 66px; padding: 10px 0 9px; border-radius: 16px; border: 1.5px solid transparent;
+    background: var(--card); color: var(--fg); text-align: center; cursor: pointer; font: inherit;
+  }
+  .day .wd { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .day .num { font-size: 26px; line-height: 1.15; }
+  .day .mo { font-size: 12px; color: var(--muted); }
+  .day .tag { font-size: 10px; margin-top: 3px; color: var(--accent); min-height: 13px; }
+  .day.on { border-color: var(--accent); background: var(--card-2); }
+  .day.on .num { color: var(--accent); }
+  .day:disabled { opacity: 0.35; cursor: default; }
+
+  /* время */
+  .times { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .time {
+    padding: 12px 0; border-radius: 12px; border: 1.5px solid transparent; background: var(--card);
+    color: var(--fg); font: 600 16px inherit; font-family: inherit; cursor: pointer; font-variant-numeric: tabular-nums;
+  }
+  .time.on { background: var(--accent); color: var(--accent-ink); }
+  .empty { color: var(--muted); background: var(--card); border-radius: var(--radius); padding: 16px; text-align: center; }
+
+  /* итог и телефон */
+  .summary { background: var(--card); border-radius: var(--radius); padding: 16px; border: 1px solid var(--line); }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; }
+  .row + .row { border-top: 1px dashed rgba(244, 236, 226, 0.08); }
+  .row span:first-child { color: var(--muted); }
+  .row span:last-child { text-align: right; font-weight: 600; }
+  .phone-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .phone-box p { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+  .btn {
+    width: 100%; border: 0; border-radius: 14px; padding: 14px 16px; cursor: pointer;
+    font: 600 16px inherit; font-family: inherit;
+  }
+  .btn-ghost { background: var(--card-2); color: var(--fg); box-shadow: inset 0 0 0 1.5px var(--line); }
+  .phone-row { display: flex; gap: 8px; margin-top: 8px; }
+  .phone-row input {
+    flex: 1; min-width: 0; padding: 13px 14px; border-radius: 14px; border: 1.5px solid var(--line);
+    background: var(--bg); color: var(--fg); font: 16px inherit; font-family: inherit; outline: none;
+  }
+  .phone-row input:focus { border-color: var(--accent); }
+  .phone-row .btn { width: auto; }
+  .ok-line { color: #8fd18f; font-size: 14px; margin-top: 10px; }
+
+  /* нижняя кнопка */
+  .cta-bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(14px + env(safe-area-inset-bottom)); background: linear-gradient(transparent, var(--bg) 35%); }
+  .cta {
+    display: block; max-width: 520px; margin: 0 auto; width: 100%; border: 0; border-radius: 16px; padding: 16px;
+    background: var(--accent); color: var(--accent-ink); font: 600 18px "Oswald", sans-serif; letter-spacing: 0.02em; cursor: pointer;
+    box-shadow: 0 10px 30px rgba(219, 165, 75, 0.35); transition: opacity 0.2s, transform 0.1s;
+  }
+  .cta:active { transform: scale(0.99); }
+  .cta:disabled { opacity: 0.35; box-shadow: none; cursor: default; }
+
+  /* мои записи */
+  .bk { background: var(--card); border-radius: var(--radius); padding: 16px; margin-bottom: 10px; border: 1px solid var(--line); }
+  .bk .t { font: 600 20px "Oswald", sans-serif; }
+  .bk .s { color: var(--muted); margin: 2px 0 12px; }
+  .bk .st { font-size: 13px; color: #8fd18f; margin-bottom: 10px; }
+  .btn-danger { background: transparent; color: var(--danger); box-shadow: inset 0 0 0 1.5px rgba(224, 112, 90, 0.4); padding: 10px; }
+
+  /* успех */
+  .done { text-align: center; padding: 30px 6px 10px; animation: rise 0.4s ease both; }
+  .check { width: 96px; height: 96px; margin: 0 auto 18px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; animation: pop 0.5s cubic-bezier(0.2, 1.3, 0.4, 1) both; box-shadow: 0 0 0 12px rgba(219, 165, 75, 0.12), 0 0 0 26px rgba(219, 165, 75, 0.06); }
+  .check svg { width: 46px; height: 46px; }
+  .check path { stroke: var(--accent-ink); stroke-width: 4; fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 60; stroke-dashoffset: 60; animation: draw 0.45s 0.25s ease forwards; }
+  @keyframes pop { from { transform: scale(0.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .done h2 { font-size: 30px; margin: 0 0 6px; }
+  .done .sub { color: var(--muted); margin: 0 0 20px; }
+  .done .summary { text-align: left; margin-bottom: 16px; }
+  .gap { height: 10px; }
+
+  .info-card { background: var(--card); border-radius: var(--radius); padding: 14px 16px; color: var(--muted); font-size: 14px; margin-top: 8px; }
+  .info-card a { color: var(--accent); text-decoration: none; font-weight: 600; }
+
+  .toast { position: fixed; left: 50%; top: 14px; transform: translate(-50%, -80px); background: var(--card-2); color: var(--fg); padding: 12px 16px; border-radius: 14px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), inset 0 0 0 1px var(--line); transition: transform 0.25s; z-index: 10; max-width: 92vw; text-align: center; }
+  .toast.on { transform: translate(-50%, 0); }
+  .skeleton { height: 76px; border-radius: var(--radius); background: linear-gradient(90deg, var(--card), var(--card-2), var(--card)); background-size: 200% 100%; animation: sh 1.2s linear infinite; margin-bottom: 10px; }
+  @keyframes sh { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <div class="logo" id="logo">Л</div>
+    <div><h1 id="salon">Онлайн-запись</h1><p id="addr">&nbsp;</p></div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab on" data-tab="book">Записаться</button>
+    <button class="tab" data-tab="mine">Мои записи<span class="badge hidden" id="mineCount"></span></button>
+  </nav>
+
+  <!-- ВКЛАДКА: запись -->
+  <main id="book">
+    <section class="step">
+      <div class="step-head"><span class="step-num">ШАГ 1</span><h2>Услуга</h2></div>
+      <div class="services" id="services"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+    </section>
+    <section class="step hidden" id="stepDay">
+      <div class="step-head"><span class="step-num">ШАГ 2</span><h2>День</h2></div>
+      <div class="days" id="days"></div>
+    </section>
+    <section class="step hidden" id="stepTime">
+      <div class="step-head"><span class="step-num">ШАГ 3</span><h2>Время</h2></div>
+      <div class="times" id="times"></div>
+    </section>
+    <section class="step hidden" id="stepSum">
+      <div class="step-head"><span class="step-num">ШАГ 4</span><h2>Проверьте запись</h2></div>
+      <div class="summary">
+        <div class="row"><span>Услуга</span><span id="sService"></span></div>
+        <div class="row"><span>Дата</span><span id="sDay"></span></div>
+        <div class="row"><span>Время</span><span id="sTime"></span></div>
+        <div class="row"><span>Стоимость</span><span id="sPrice"></span></div>
+        <div class="phone-box hidden" id="phoneBox">
+          <p>Оставьте номер — мастер сможет позвонить, если что-то изменится. Спросим один раз.</p>
+          <button class="btn btn-ghost" id="tgPhone">📱 Взять номер из Telegram</button>
+          <div class="phone-row">
+            <input id="phoneInput" type="tel" inputmode="tel" placeholder="+7 900 123-45-67" autocomplete="tel" />
+            <button class="btn btn-ghost" id="phoneSave">OK</button>
+          </div>
+        </div>
+        <div class="ok-line hidden" id="phoneOk"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ВКЛАДКА: мои записи -->
+  <main id="mine" class="hidden">
+    <div id="mineList"></div>
+    <div class="info-card" id="contacts"></div>
+  </main>
+
+  <!-- ЭКРАН: успех -->
+  <main id="success" class="hidden">
+    <div class="done">
+      <div class="check"><svg viewBox="0 0 48 48"><path d="M12 25l8 8 16-17" /></svg></div>
+      <h2>Вы записаны!</h2>
+      <p class="sub">Напомним о визите накануне и за 2 часа</p>
+      <div class="summary">
+        <div class="row"><span>Услуга</span><span id="dService"></span></div>
+        <div class="row"><span>Когда</span><span id="dWhen"></span></div>
+        <div class="row"><span>Адрес</span><span id="dAddr"></span></div>
+      </div>
+      <button class="btn btn-ghost" id="toMine">Мои записи</button>
+      <div class="gap"></div>
+      <button class="btn btn-ghost" id="closeApp">Готово</button>
+    </div>
+  </main>
+</div>
+
+<div class="cta-bar" id="ctaBar"><button class="cta" id="cta" disabled>Выберите услугу</button></div>
+<div class="toast" id="toast"></div>
+
+<script>
+  // ---------- Telegram ----------
+  const tg = window.Telegram ? window.Telegram.WebApp : null;
+  const initData = tg ? tg.initData : "";
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    try { tg.setHeaderColor("#15110f"); tg.setBackgroundColor("#15110f"); } catch (e) {}
+  }
+  const haptic = (kind) => { try { kind === "ok" ? tg.HapticFeedback.notificationOccurred("success") : tg.HapticFeedback.selectionChanged(); } catch (e) {} };
+
+  // ---------- состояние ----------
+  const $ = (id) => document.getElementById(id);
+  const S = { config: null, service: null, day: null, time: null, phone: null, bookings: [] };
+  const ICONS = { cut: "✂️", beard: "🧔", combo: "💈" };
+
+  // запросы к боту: GET без подписи, POST — с подписью Telegram (initData)
+  async function api(method, path, body) {
+    const opt = method === "POST" ? { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, initData }) } : {};
+    const r = await fetch(path, opt);
+    return r.json();
+  }
+  function toast(text) {
+    const t = $("toast");
+    t.textContent = text;
+    t.classList.add("on");
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => t.classList.remove("on"), 2600);
+  }
+  const show = (id, on = true) => $(id).classList.toggle("hidden", !on);
+
+  // ---------- нижняя кнопка ----------
+  function updateCta() {
+    const cta = $("cta");
+    show("ctaBar", !$("book").classList.contains("hidden"));
+    if (!S.service) { cta.disabled = true; cta.textContent = "Выберите услугу"; return; }
+    if (!S.day) { cta.disabled = true; cta.textContent = "Выберите день"; return; }
+    if (!S.time) { cta.disabled = true; cta.textContent = "Выберите время"; return; }
+    if (!S.phone) { cta.disabled = true; cta.textContent = "Оставьте номер телефона"; return; }
+    cta.disabled = false;
+    cta.textContent = `Записаться · ${S.service.price} ₽`;
+  }
+
+  // ---------- шаг 1: услуги ----------
+  function renderServices() {
+    $("services").innerHTML = "";
+    for (const s of S.config.services) {
+      const b = document.createElement("button");
+      b.className = "service" + (S.service && S.service.id === s.id ? " on" : "");
+      b.innerHTML = `<span class="ico">${ICONS[s.id] || "✨"}</span><span class="info"><div class="name"></div><div class="dur"></div></span><span class="price">${s.price} ₽</span>`;
+      b.querySelector(".name").textContent = s.name;
+      b.querySelector(".dur").textContent = s.dur;
+      b.onclick = () => { haptic(); S.service = s; S.day = null; S.time = null; renderServices(); loadDays(); };
+      $("services").appendChild(b);
+    }
+  }
+
+  // ---------- шаг 2: дни ----------
+  async function loadDays() {
+    show("stepDay"); show("stepTime", false); show("stepSum", false); updateCta();
+    $("days").innerHTML = '<div class="skeleton" style="width:100%;height:84px"></div>';
+    const days = await api("GET", `/api/days?service=${S.service.id}`);
+    $("days").innerHTML = "";
+    let first = null;
+    for (const d of days) {
+      const b = document.createElement("button");
+      b.className = "day";
+      b.disabled = d.off || !d.free;
+      b.innerHTML = `<div class="wd">${d.label || d.weekday}</div><div class="num">${d.day}</div><div class="mo">${d.month}</div><div class="tag">${d.off ? "выходной" : d.free ? "" : "нет мест"}</div>`;
+      b.onclick = () => { haptic(); S.day = d; S.time = null; [...$("days").children].forEach((x) => x.classList.remove("on")); b.classList.add("on"); loadTimes(); };
+      $("days").appendChild(b);
+      if (!first && !b.disabled) first = b;
+    }
+    $("stepDay").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // ---------- шаг 3: время ----------
+  async function loadTimes() {
+    show("stepTime"); show("stepSum", false); updateCta();
+    $("times").innerHTML = "";
+    const slots = await api("GET", `/api/slots?service=${S.service.id}&day=${S.day.iso}`);
+    if (!slots.length) { $("times").innerHTML = '<div class="empty" style="grid-column:1/-1">На этот день всё занято — выберите другой</div>'; return; }
+    for (const s of slots) {
+      const b = document.createElement("button");
+      b.className = "time";
+      b.textContent = s.time;
+      b.onclick = () => { haptic(); S.time = s; [...$("times").children].forEach((x) => x.classList.remove("on")); b.classList.add("on"); renderSummary(); };
+      $("times").appendChild(b);
+    }
+    $("stepTime").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // ---------- шаг 4: итог и телефон ----------
+  function renderSummary() {
+    show("stepSum");
+    $("sService").textContent = S.service.name;
+    $("sDay").textContent = `${S.day.label || S.day.weekday}, ${S.day.day} ${S.day.month}`;
+    $("sTime").textContent = `${S.time.time}–${S.time.end}`;
+    $("sPrice").textContent = `${S.service.price} ₽`;
+    show("phoneBox", !S.phone);
+    show("phoneOk", !!S.phone);
+    if (S.phone) $("phoneOk").textContent = `✓ Номер для связи: ${S.phone}`;
+    updateCta();
+    setTimeout(() => $("stepSum").scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+  }
+
+  // номер из Telegram: Telegram присылает его боту, а мы ждём, пока бот его сохранит
+  $("tgPhone").onclick = () => {
+    if (!tg || !tg.requestContact || !tg.isVersionAtLeast("6.9")) { toast("Введите номер вручную ниже"); return; }
+    tg.requestContact(async (shared, resp) => {
+      if (!shared) return;
+      for (let i = 0; i < 8; i++) {
+        const me = await api("POST", "/api/me", {});
+        if (me.phone) { S.phone = me.phone; haptic("ok"); renderSummary(); return; }
+        await new Promise((r) => setTimeout(r, 700));
+      }
+      // не дождались — подставляем номер в поле, клиенту останется нажать OK
+      const num = resp && resp.responseUnsafe && resp.responseUnsafe.contact && resp.responseUnsafe.contact.phone_number;
+      if (num) $("phoneInput").value = num.startsWith("+") ? num : "+" + num;
+      toast("Нажмите OK, чтобы сохранить номер");
+    });
+  };
+  $("phoneSave").onclick = async () => {
+    const r = await api("POST", "/api/phone", { phone: $("phoneInput").value });
+    if (r.error) { toast(r.error === "auth" ? "Откройте окно из Telegram" : "Не похоже на номер. Пример: +7 900 123-45-67"); return; }
+    S.phone = r.phone; haptic("ok"); renderSummary();
+  };
+
+  // ---------- записаться ----------
+  $("cta").onclick = async () => {
+    const cta = $("cta");
+    cta.disabled = true; cta.textContent = "Записываем…";
+    const r = await api("POST", "/api/book", { service: S.service.id, day: S.day.iso, time: S.time.time });
+    if (r.error) {
+      const msg = { taken: "Это время только что заняли — выберите другое", limit: "У вас уже 2 записи — отмените одну во вкладке «Мои записи»", need_phone: "Оставьте номер телефона", auth: "Откройте окно из Telegram, чтобы записаться" }[r.error] || "Что-то пошло не так, попробуйте ещё раз";
+      toast(msg);
+      if (r.error === "taken") { S.time = null; loadTimes(); }
+      updateCta();
+      return;
+    }
+    haptic("ok");
+    $("dService").textContent = r.booking.service;
+    $("dWhen").textContent = `${r.booking.pretty}, ${r.booking.range}`;
+    $("dAddr").textContent = r.booking.address;
+    show("book", false); show("mine", false); show("success"); show("ctaBar", false);
+    window.scrollTo({ top: 0 });
+    // форма записи — с чистого листа для следующего раза
+    S.service = null; S.day = null; S.time = null;
+    renderServices(); show("stepDay", false); show("stepTime", false); show("stepSum", false);
+    loadMe();
+  };
+
+  // ---------- мои записи ----------
+  function renderMine() {
+    const list = $("mineList");
+    list.innerHTML = "";
+    $("mineCount").textContent = S.bookings.length;
+    show("mineCount", S.bookings.length > 0);
+    if (!initData) { list.innerHTML = '<div class="empty">Откройте окно из Telegram, чтобы видеть свои записи</div>'; return; }
+    if (!S.bookings.length) { list.innerHTML = '<div class="empty">Пока записей нет</div>'; return; }
+    for (const b of S.bookings) {
+      const el = document.createElement("div");
+      el.className = "bk";
+      el.innerHTML = `<div class="t"></div><div class="s"></div>${b.confirmed ? '<div class="st">✓ Вы подтвердили визит</div>' : ""}<button class="btn btn-danger">Отменить запись</button>`;
+      el.querySelector(".t").textContent = `${b.pretty}, ${b.range}`;
+      el.querySelector(".s").textContent = b.service;
+      el.querySelector("button").onclick = () => {
+        const go = async () => {
+          const r = await api("POST", "/api/cancel", { id: b.id });
+          if (r.bookings) S.bookings = r.bookings; else S.bookings = S.bookings.filter((x) => x.id !== b.id);
+          toast("Запись отменена"); renderMine();
+        };
+        if (tg && tg.showConfirm) tg.showConfirm("Отменить эту запись?", (ok) => ok && go()); else if (confirm("Отменить эту запись?")) go();
+      };
+      list.appendChild(el);
+    }
+  }
+  async function loadMe() {
+    if (!initData) { renderMine(); return; }
+    const me = await api("POST", "/api/me", {});
+    if (me.error) return;
+    S.phone = me.phone;
+    S.bookings = me.bookings;
+    renderMine();
+  }
+
+  // ---------- вкладки и кнопки ----------
+  function openTab(name) {
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("on", t.dataset.tab === name));
+    show("book", name === "book"); show("mine", name === "mine"); show("success", false);
+    updateCta();
+    if (name === "mine") loadMe();
+  }
+  document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => { haptic(); openTab(t.dataset.tab); }));
+  $("toMine").onclick = () => openTab("mine");
+  $("closeApp").onclick = () => (tg && tg.close ? tg.close() : openTab("book"));
+
+  // ---------- старт ----------
+  (async () => {
+    S.config = await api("GET", "/api/config");
+    $("salon").textContent = S.config.salon.replace(/^./, (c) => c.toUpperCase());
+    $("addr").textContent = `${S.config.city}, ${S.config.address}`;
+    $("logo").textContent = (S.config.salon.match(/«(.)/) || [, "★"])[1];
+    $("contacts").innerHTML = `📍 ${S.config.city}, ${S.config.address}<br>🕙 ${S.config.schedule.join("<br>🕙 ")}<br>📞 ${S.config.phone}<br><br><a href="${S.config.mapLink}" target="_blank" id="mapLink">🗺 Открыть на карте</a>`;
+    // внутри Telegram ссылку открываем через Telegram — так она точно откроется в браузере
+    $("mapLink").onclick = (e) => { if (tg && tg.openLink) { e.preventDefault(); tg.openLink(S.config.mapLink); } };
+    renderServices();
+    await loadMe();
+    updateCta();
+  })();
+</script>
+</body>
+</html>

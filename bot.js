@@ -7,6 +7,8 @@ const { Bot, InlineKeyboard, Keyboard } = require("grammy");
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const ADMIN_ID = Number(process.env.ADMIN_ID || 0); // мастер: получает уведомления и видит /master
+const WEBAPP_URL = process.env.WEBAPP_URL || ""; // адрес окна записи (Mini App), https://…/ ; пусто — только запись в чате
+const WEB_PORT = Number(process.env.WEB_PORT || 3000); // порт, на котором бот отдаёт окно записи (снаружи его закрывает HTTPS-сервер Caddy)
 
 // ======================= НАСТРОЙКИ МАСТЕРА =======================
 // Под нового заказчика меняется только этот блок.
@@ -203,9 +205,13 @@ const edit = (ctx, text, kb) => ctx.editMessageText(text, { reply_markup: kb }).
 const isAdmin = (ctx) => ctx.from.id === ADMIN_ID;
 
 // ---------- команды ----------
-bot.command("start", (ctx) =>
-  ctx.reply(`Здравствуйте, ${ctx.from.first_name}! 👋\nЯ бот онлайн-записи в ${SALON}. Выберите кнопку внизу 👇`, { reply_markup: mainMenu }),
-);
+bot.command("start", async (ctx) => {
+  await ctx.reply(`Здравствуйте, ${ctx.from.first_name}! 👋\nЯ бот онлайн-записи в ${SALON}.`, { reply_markup: mainMenu });
+  if (WEBAPP_URL) {
+    const kb = new InlineKeyboard().webApp("📅 Записаться онлайн", WEBAPP_URL);
+    await ctx.reply("Выберите услугу, день и время в удобном окне — это займёт полминуты 👇", { reply_markup: kb });
+  }
+});
 bot.command("myid", (ctx) => ctx.reply(`Ваш id: ${ctx.from.id}`));
 
 // ---------- панель мастера: /master ----------
@@ -368,10 +374,20 @@ async function showBook(ctx) {
       { reply_markup: mainMenu },
     );
   }
+  // если окно записи (Mini App) настроено — предлагаем его, запись в чате остаётся запасным вариантом
+  if (WEBAPP_URL) {
+    const kb = new InlineKeyboard().webApp("📅 Открыть онлайн-запись", WEBAPP_URL).row().text("💬 Записаться в чате", "chatbook");
+    return ctx.reply("Выберите услугу, день и время в удобном окне 👇", { reply_markup: kb });
+  }
+  return showServices(ctx);
+}
+// запись прямо в чате: список услуг кнопками
+async function showServices(ctx) {
   const kb = new InlineKeyboard();
   SERVICES.forEach((s) => kb.text(`${s.name} — ${s.price} ₽ · ${durText(s.minutes)}`, `svc:${s.id}`).row());
   await ctx.reply("Выберите услугу:", { reply_markup: kb });
 }
+bot.callbackQuery("chatbook", async (ctx) => { await ctx.answerCallbackQuery(); await showServices(ctx); });
 
 async function showMine(ctx) {
   const mine = myUpcoming(ctx.from.id);
@@ -398,15 +414,21 @@ for (const s of sections) {
 }
 
 // ---------- клиент отменяет свою запись (из «Мои записи» или из напоминания) ----------
+// общая отмена для чата и Mini App: отменить можно только свою запись; возвращает запись или null
+async function cancelByClient(userId, id) {
+  const list = loadBookings();
+  const b = list.find((x) => x.id === id && x.userId === userId);
+  if (!b) return null;
+  saveBookings(list.filter((x) => x !== b));
+  await notifyAdmin(`❌ Клиент отменил запись\n👤 ${b.name}${b.phone ? `\n📞 ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${timeRange(b)}`);
+  return b;
+}
 bot.callbackQuery(/^del:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const list = loadBookings();
-  const b = list.find((x) => x.id === ctx.match[1] && x.userId === ctx.from.id); // отменить можно только свою
+  const b = await cancelByClient(ctx.from.id, ctx.match[1]);
   if (!b) return edit(ctx, "Эта запись уже отменена.");
-  saveBookings(list.filter((x) => x !== b));
   await edit(ctx, `Запись на ${prettyDay(b.day)}, ${b.time} отменена.`);
   await ctx.reply("Хорошо, запись отменена. Будем рады видеть вас в другой раз! 👇", { reply_markup: mainMenu });
-  await notifyAdmin(`❌ Клиент отменил запись\n👤 ${b.name}${b.phone ? `\n📞 ${b.phone}` : ""}\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}, ${timeRange(b)}`);
 });
 
 // ---------- клиент подтверждает визит (кнопка из напоминания накануне) ----------
@@ -485,33 +507,41 @@ bot.callbackQuery("confirm", async (ctx) => {
 // номер с пометкой для мастера: настоящий из Telegram или написанный клиентом
 const phoneLine = (u) => `${u.phone} ${u.verified ? "(из Telegram ✅)" : "(указал сам)"}`;
 
-// сохраняем запись и сообщаем обоим: клиенту и мастеру
-async function finishBooking(ctx, draft) {
-  const user = getUser(ctx.from.id);
-  drafts.delete(ctx.from.id);
-  if (!canStart(draft.day, draft.time, draft.minutes)) return ctx.reply("Ой, это время только что заняли 😔 Выберите другое 👇", { reply_markup: mainMenu });
-  if (!isAdmin(ctx) && myUpcoming(ctx.from.id).length >= MAX_ACTIVE) {
-    return ctx.reply(`У вас уже ${MAX_ACTIVE} записи — это максимум. Отмените одну в «📋 Мои записи».`, { reply_markup: mainMenu });
-  }
+const bookedText = (b) =>
+  `✅ Вы записаны!\n✂️ ${b.service}\n📅 ${prettyDay(b.day)}\n🕐 ${timeRange(b)}\n\nЖдём вас: ${ADDRESS}\nНапомним о визите заранее 😉`;
 
-  const name = ctx.from.first_name + (ctx.from.username ? ` (@${ctx.from.username})` : "");
+// одна запись — общая для чата и Mini App. from — пользователь Telegram, draft — { service, minutes, day, time }.
+// Возвращает { booking } или { error: "need_phone" | "taken" | "limit" }
+async function createBooking(from, draft) {
+  const user = getUser(from.id);
+  if (!user?.phone) return { error: "need_phone" };
+  if (!canStart(draft.day, draft.time, draft.minutes)) return { error: "taken" };
+  if (from.id !== ADMIN_ID && myUpcoming(from.id).length >= MAX_ACTIVE) return { error: "limit" };
+
+  const name = from.first_name + (from.username ? ` (@${from.username})` : "");
   // напоминание «Придёте?» шлём накануне в DAY_REMIND_AT; если записались позже — уже не нужно
   const tooLateForDayRemind = draft.day === dayAfter(0) || (draft.day === dayAfter(1) && nowAfter(DAY_REMIND_AT));
-  const list = loadBookings();
-  list.push({
+  const booking = {
     id: Math.random().toString(36).slice(2, 9),
     service: draft.service, minutes: draft.minutes, day: draft.day, time: draft.time,
-    name, phone: user.phone, userId: ctx.from.id,
+    name, phone: user.phone, userId: from.id,
     dayReminded: tooLateForDayRemind, reminded: false, reviewAsked: false, confirmed: false,
     createdAt: new Date().toISOString(),
-  });
+  };
+  const list = loadBookings();
+  list.push(booking);
   saveBookings(list);
+  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phoneLine(user)}\n✂️ ${booking.service}\n📅 ${prettyDay(booking.day)}, ${timeRange(booking)}`);
+  return { booking };
+}
 
-  await ctx.reply(
-    `✅ Вы записаны!\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}\n🕐 ${timeRange(draft)}\n\nЖдём вас: ${ADDRESS}\nНапомним о визите заранее 😉`,
-    { reply_markup: mainMenu },
-  );
-  await notifyAdmin(`🔔 Новая запись!\n👤 ${name}\n📞 ${phoneLine(user)}\n✂️ ${draft.service}\n📅 ${prettyDay(draft.day)}, ${timeRange(draft)}`);
+// запись из чата: сохраняем и отвечаем клиенту
+async function finishBooking(ctx, draft) {
+  drafts.delete(ctx.from.id);
+  const r = await createBooking(ctx.from, draft);
+  if (r.error === "taken") return ctx.reply("Ой, это время только что заняли 😔 Выберите другое 👇", { reply_markup: mainMenu });
+  if (r.error === "limit") return ctx.reply(`У вас уже ${MAX_ACTIVE} записи — это максимум. Отмените одну в «📋 Мои записи».`, { reply_markup: mainMenu });
+  await ctx.reply(bookedText(r.booking), { reply_markup: mainMenu });
 }
 
 // ---------- номер телефона ----------
@@ -628,7 +658,7 @@ async function tick() {
     saveState({ ...state, digestDay: today });
   }
 }
-setInterval(() => tick().catch((e) => console.error("Ошибка в напоминаниях:", e.message)), 60 * 1000);
+if (process.env.WEB_ONLY !== "1") setInterval(() => tick().catch((e) => console.error("Ошибка в напоминаниях:", e.message)), 60 * 1000);
 
 // ---------- профиль бота в Telegram ----------
 // Кнопка «Меню» слева от поля ввода и текст «Что умеет этот бот?», который видно в пустом чате до нажатия «Старт»
@@ -650,6 +680,8 @@ async function setupProfile() {
         { scope: { type: "chat", chat_id: ADMIN_ID } },
       );
     }
+    // кнопка слева от поля ввода открывает окно записи
+    if (WEBAPP_URL) await bot.api.setChatMenuButton({ menu_button: { type: "web_app", text: "Записаться", web_app: { url: WEBAPP_URL } } });
     await bot.api.setMyDescription(
       `Онлайн-запись в ${SALON} ✂️\n\n• Запись за 30 секунд — без звонков и переписки\n• Видно только свободное время\n• Напомним о визите накануне и за ${REMIND_BEFORE_HOURS} часа\n• Отменить запись — в один клик\n\nНажмите «Старт» 👇`,
     );
@@ -659,8 +691,119 @@ async function setupProfile() {
   }
 }
 
+// ======================= ОКНО ЗАПИСИ (Mini App) =======================
+// Бот сам раздаёт страницу webapp/index.html и отвечает ей данными (/api/...).
+// Снаружи всё это закрыто HTTPS-сервером Caddy: https://…sslip.io → localhost:WEB_PORT
+const http = require("http");
+const crypto = require("crypto");
+const path = require("path");
+
+// Telegram подписывает данные пользователя токеном бота — проверяем подпись, подделать её нельзя.
+// Возвращает пользователя { id, first_name, username } или null
+function checkInitData(initData) {
+  if (!initData) return null;
+  const params = new URLSearchParams(initData);
+  const hash = params.get("hash");
+  if (!hash) return null;
+  params.delete("hash");
+  const dataCheck = [...params.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${k}=${v}`).join("\n");
+  const secret = crypto.createHmac("sha256", "WebAppData").update(process.env.BOT_TOKEN).digest();
+  const calc = crypto.createHmac("sha256", secret).update(dataCheck).digest("hex");
+  if (calc.length !== hash.length || !crypto.timingSafeEqual(Buffer.from(calc), Buffer.from(hash))) return null;
+  if (Date.now() / 1000 - Number(params.get("auth_date")) > 24 * 3600) return null; // подпись старше суток — не принимаем
+  try { return JSON.parse(params.get("user")); } catch { return null; }
+}
+
+// день для окна: «пн», «21», «окт», сколько свободных окошек
+function dayCard(iso, minutes) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const free = freeStarts(iso, minutes).length;
+  const i = nextDays().findIndex((x) => x.iso === iso);
+  return { iso, weekday: weekdayOf(iso), day: d, month: MONTHS[m - 1].slice(0, 3), label: i === 0 ? "Сегодня" : i === 1 ? "Завтра" : "", free, off: !workHours(iso) || isDayClosed(iso) };
+}
+const myBookingsView = (userId) =>
+  myUpcoming(userId).map((b) => ({ id: b.id, service: b.service, day: b.day, pretty: prettyDay(b.day), range: timeRange(b), confirmed: !!b.confirmed }));
+
+const API = {
+  // всё, что окну нужно знать о салоне
+  "GET /api/config": () => ({
+    salon: SALON, city: CITY, address: ADDRESS, phone: SALON_PHONE, mapLink: MAP_LINK, schedule: scheduleText().split("\n🕙 "),
+    services: SERVICES.map((s) => ({ id: s.id, name: s.name, price: s.price, minutes: s.minutes, dur: durText(s.minutes) })),
+  }),
+  // дни на DAYS_AHEAD вперёд с количеством свободного времени под услугу
+  "GET /api/days": (q) => {
+    const s = SERVICES.find((x) => x.id === q.get("service"));
+    if (!s) return { error: "service" };
+    return nextDays().map((d) => dayCard(d.iso, s.minutes));
+  },
+  // свободное время на день под услугу
+  "GET /api/slots": (q) => {
+    const s = SERVICES.find((x) => x.id === q.get("service"));
+    if (!s) return { error: "service" };
+    return freeStarts(q.get("day") || "", s.minutes).map((t) => ({ time: t, end: toTime(toMin(t) + s.minutes) }));
+  },
+  // кто я: номер (если уже есть) и мои записи
+  "POST /api/me": (_, body, user) => ({ phone: getUser(user.id)?.phone || null, bookings: myBookingsView(user.id) }),
+  // номер, введённый руками в окне
+  "POST /api/phone": (_, body, user) => {
+    const phone = parsePhone(String(body.phone || ""));
+    if (!phone) return { error: "phone" };
+    savePhone(user.id, phone, false);
+    return { phone };
+  },
+  // записаться
+  "POST /api/book": async (_, body, user) => {
+    const s = SERVICES.find((x) => x.id === body.service);
+    if (!s) return { error: "service" };
+    const r = await createBooking(user, { service: s.name, minutes: s.minutes, day: String(body.day), time: String(body.time) });
+    if (r.error) return r;
+    // дублируем подтверждение в чат — чтобы запись осталась перед глазами
+    await send(user.id, bookedText(r.booking), mainMenu);
+    return { booking: { id: r.booking.id, service: r.booking.service, pretty: prettyDay(r.booking.day), range: timeRange(r.booking), address: ADDRESS } };
+  },
+  // отменить свою запись
+  "POST /api/cancel": async (_, body, user) => {
+    const b = await cancelByClient(user.id, String(body.id));
+    return b ? { ok: true, bookings: myBookingsView(user.id) } : { error: "gone" };
+  },
+};
+
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
+const WEB_DIR = path.join(__dirname, "webapp");
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, "http://localhost");
+  const json = (code, data) => { res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }); res.end(JSON.stringify(data)); };
+  try {
+    const handler = API[`${req.method} ${url.pathname}`];
+    if (handler) {
+      let body = {};
+      let user = null;
+      if (req.method === "POST") {
+        let raw = "";
+        for await (const chunk of req) { raw += chunk; if (raw.length > 10000) return json(413, { error: "big" }); }
+        body = JSON.parse(raw || "{}");
+        user = checkInitData(body.initData);
+        if (!user) return json(401, { error: "auth" }); // открыто не из Telegram или подпись не сошлась
+      }
+      return json(200, await handler(url.searchParams, body, user));
+    }
+    // статика: страница окна и её файлы (только из папки webapp)
+    const file = path.normalize(path.join(WEB_DIR, url.pathname === "/" ? "index.html" : url.pathname));
+    if (!file.startsWith(WEB_DIR) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return json(404, { error: "not found" });
+    res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream", "Cache-Control": "no-cache" });
+    fs.createReadStream(file).pipe(res);
+  } catch (e) {
+    console.error("Ошибка окна записи:", e.message);
+    json(500, { error: "server" });
+  }
+});
+
 bot.catch((err) => console.error("Ошибка:", err.message));
-setupProfile();
-bot.start();
-tick().catch((e) => console.error("Ошибка в напоминаниях:", e.message));
-console.log("Бот запущен! Откройте его в Telegram и напишите /start");
+server.listen(WEB_PORT, "127.0.0.1", () => console.log(`Окно записи: http://127.0.0.1:${WEB_PORT}`));
+if (process.env.WEB_ONLY !== "1") { // WEB_ONLY=1 — только окно, без Telegram (для проверки на своём компьютере)
+  setupProfile();
+  bot.start();
+  tick().catch((e) => console.error("Ошибка в напоминаниях:", e.message));
+  console.log("Бот запущен! Откройте его в Telegram и напишите /start");
+}
